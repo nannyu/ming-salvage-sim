@@ -12,8 +12,13 @@ def build_minister_tools(character: Character, context: CourtContext):
     skill_ids = set(available_skill_ids(character, context.db))
 
     def view_state() -> str:
-        """查看当前大明核心国势数值。"""
-        return state_context(context.state) + "。派系：" + context.db.faction_report() + "。外部：" + context.db.external_power_report()
+        """查看当前大明核心国势数值（含派系/阶级/外部势力）。"""
+        return (
+            state_context(context.state)
+            + "。派系：" + context.db.faction_report()
+            + "。" + context.db.class_report()
+            + "。外部：" + context.db.external_power_report()
+        )
 
     def list_memorials() -> str:
         """查看当前在办的所有事项（issue）。"""
@@ -81,12 +86,16 @@ def build_minister_tools(character: Character, context: CourtContext):
         if n < 1 or n > len(rows):
             return f"slot 越界 {n}。本{TURN_UNIT}有 {len(rows)} 条在办事项。"
         row = rows[n - 1]
-        resistance = int(row["severity"]) // 4 + context.state.metrics["党争"] // 6
+        db = context.db
+        faction_lev_avg = db.conn.execute("SELECT AVG(leverage) AS v FROM factions").fetchone()["v"] or 50
+        resistance = int(row["severity"]) // 4 + int(faction_lev_avg) // 6
         tags = row["faction_hint"] or ""
         if any(t in tags for t in ("边", "军")):
-            resistance += context.state.metrics["边防"] // 12
+            arrears_avg = db.conn.execute("SELECT AVG(arrears) AS v FROM armies").fetchone()["v"] or 0
+            resistance += int(arrears_avg) // 12
         if any(t in tags for t in ("百姓", "地方", "士绅")):
-            resistance += context.state.metrics["民变"] // 12
+            unrest_avg = db.conn.execute("SELECT AVG(unrest) AS v FROM regions").fetchone()["v"] or 0
+            resistance += int(unrest_avg) // 12
         if any(t in tags for t in ("户部", "财")):
             resistance += max(0, 500 - context.state.metrics["国库"]) // 50
         if resistance >= 28:
@@ -160,3 +169,92 @@ def build_minister_tools(character: Character, context: CourtContext):
         seen_tool_names.add(name)
         unique_tools.append(tool)
     return unique_tools
+
+
+def build_simulator_tools(context: CourtContext):
+    """月末推演日讲官的只读查询工具。
+
+    与大臣 tool 的差异：纯只读、无 court tool（拟旨/退下/换人）、无 skill 闸。
+    推演官借这些 tool 按需查实时盘面，让月末邸报有据，不靠 payload 静态快照瞎编。
+    """
+    def view_state() -> str:
+        """查看当前大明核心国势数值（含派系/阶级/外部势力）。"""
+        return (
+            state_context(context.state)
+            + "。派系：" + context.db.faction_report()
+            + "。" + context.db.class_report()
+            + "。外部：" + context.db.external_power_report()
+        )
+
+    def list_issues() -> str:
+        """查看当前在办的所有事项（issue）及进度。"""
+        rows = context.db.list_active_issues()
+        if not rows:
+            return f"本{TURN_UNIT}无在办事项。"
+        lines = []
+        for row in rows:
+            kind_tag = "系统" if row["kind"] == "situation" else "皇帝推动"
+            lines.append(
+                f"#{row['id']}[{kind_tag}]{row['title']}"
+                f"（bar {int(row['bar_value'])}/{row['bar_good_meaning']}，{row['stage_text']}）"
+            )
+        return "\n".join(lines)
+
+    def inspect_issue(issue_id: int) -> str:
+        """查看某条在办事项细节。issue_id 是事项编号（由 list_issues 给出，带 # 的数字）。"""
+        rows = context.db.list_active_issues()
+        try:
+            n = int(issue_id)
+        except (ValueError, TypeError):
+            return "issue_id 必须是整数。"
+        row = next((r for r in rows if int(r["id"]) == n), None)
+        if row is None:
+            return f"未找到在办事项 #{n}。可先调 list_issues 看清单。"
+        return (
+            f"#{row['id']} {row['title']}（bar {int(row['bar_value'])}，"
+            f"{row['bar_bad_meaning']}↔{row['bar_good_meaning']}）。"
+            f"阶段：{row['stage_text']}。牵涉：{row['faction_hint'] or '—'}。"
+            f"结案条件：{row['resolve_condition'] or '（未填）'}。失败条件：{row['fail_condition'] or '（未填）'}。"
+        )
+
+    def list_regions() -> str:
+        f"""查看两京十三省最危险地区和账面{TURN_UNIT}税。"""
+        return context.db.region_report(limit=8)
+
+    def inspect_region(region_name: str) -> str:
+        """查看某一地区人口、民心、动乱、天灾、人祸、田亩和税收。"""
+        try:
+            return context.db.region_detail(region_name)
+        except ValueError as e:
+            return f"未找到地区 '{region_name}'。可先调 list_regions 看地区列表。错误：{e}"
+
+    def list_armies() -> str:
+        """查看大明主要军队的驻扎、维护费、补给、士气和欠饷警讯。"""
+        return context.db.army_report(limit=8)
+
+    def inspect_army(army_name: str) -> str:
+        """查看某支军队驻扎地、兵种、人数、维护费、补给、士气、训练和欠饷。"""
+        try:
+            return context.db.army_detail(army_name)
+        except ValueError as e:
+            return f"未找到军队 '{army_name}'。可先调 list_armies 看军队列表。错误：{e}"
+
+    def list_external_powers() -> str:
+        """查看后金、蒙古、朝鲜、流寇等外部势力状态。"""
+        return context.db.external_power_report()
+
+    def check_treasury() -> str:
+        """查国库、内库、收支和欠账明细。"""
+        return context.db.treasury_report(context.state)
+
+    return [
+        view_state,
+        list_issues,
+        inspect_issue,
+        list_regions,
+        inspect_region,
+        list_armies,
+        inspect_army,
+        list_external_powers,
+        check_treasury,
+    ]

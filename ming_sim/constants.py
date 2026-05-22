@@ -12,7 +12,7 @@ CONTENT_DIR = os.path.join(ROOT_DIR, "content")
 WRAP = 88
 MONEY_UNIT = "万两"
 ECONOMY_ACCOUNTS = ("国库", "内库")
-SCORE_METRICS = ("民心", "皇威", "边防", "民变", "党争", "执行", "瞒报")
+SCORE_METRICS = ("民心", "皇威")
 
 # 一回合的时段单位字。改此处即可全局切换回合语义（月/旬/季）；
 # prompts 用占位符 {{TURN_UNIT}}，代码渲染用 TURN_UNIT 变量。

@@ -17,6 +17,7 @@ from ming_sim.db import GameDB
 from ming_sim.flows import (
     ISSUE_METRIC_KEYS,
     ISSUE_METRIC_LOCK_CAPS,
+    _apply_class_dict,
     _apply_economy_list,
     _apply_faction_dict,
     _apply_metric_dict,
@@ -73,16 +74,99 @@ def _spawned_event_refs(db: GameDB) -> set:
     return refs
 
 
-def _gate_passed(gate: Dict[str, str], metrics: Dict[str, int]) -> bool:
-    """trigger_gate 全部条件满足才返回 True。条件形如 '<=240'。"""
-    for metric, cond in gate.items():
-        if metric not in metrics:
-            return False
+_GATE_AGG_FUNCS = {
+    "max": max,
+    "min": min,
+    "sum": sum,
+    "avg": lambda xs: sum(xs) // max(1, len(xs)),
+}
+
+
+def _eval_gate_key(key: str, metrics: Dict[str, int], db: GameDB) -> Optional[int]:
+    """把 gate key 解析成一个 int 值。形式：
+      - 'metric_name'                           → metrics[key]
+      - 'region.<id>.<field>'                   → regions 表
+      - 'region.<id1>|<id2>|.<field>.<agg>'     → 多省聚合 (max/min/avg/sum)
+      - 'army.<id>.<field>' / 多军 + agg
+      - 'external.<id>.<field>' / 多 + agg
+      - 'class.<name>.<field>'                  → classes 表全国汇总 (region_id='')
+      - 'class.<name>@<region>.<field>'         → classes 表省级
+      - 'class.<name>@<r1>|<r2>|.<field>.<agg>' → 多省同阶级聚合
+    解析失败/数据缺失返回 None（gate 视为不通过，由调用方处理）。
+    """
+    if "." not in key:
+        if key in metrics:
+            return int(metrics[key])
+        return None
+    parts = key.split(".")
+    table = parts[0]
+    if table not in ("region", "army", "external", "class"):
+        return None
+    # 末段可能是 agg，先抽出
+    agg = None
+    if parts[-1] in _GATE_AGG_FUNCS:
+        agg = parts[-1]
+        parts = parts[:-1]
+    if len(parts) < 3:
+        return None
+    field = parts[-1]
+    id_segment = ".".join(parts[1:-1])
+    if table == "class" and "@" in id_segment and "|" in id_segment.split("@", 1)[1]:
+        # 简写：class.<name>@<r1>|<r2>|<r3>.<field> → 展开成 [name@r1, name@r2, name@r3]
+        cname, rest = id_segment.split("@", 1)
+        ids = [f"{cname}@{r}" for r in rest.split("|") if r]
+    else:
+        ids = id_segment.split("|") if "|" in id_segment else [id_segment]
+        ids = [x for x in ids if x]
+    if not ids:
+        return None
+    # class 表的 id 是 name 或 name@region；其它表 id 就是行 id
+    values: List[int] = []
+    for cid in ids:
+        row = None
+        if table == "region":
+            row = db.conn.execute(f"SELECT {field} FROM regions WHERE id = ?", (cid,)).fetchone()
+        elif table == "army":
+            row = db.conn.execute(f"SELECT {field} FROM armies WHERE id = ?", (cid,)).fetchone()
+        elif table == "external":
+            row = db.conn.execute(f"SELECT {field} FROM external_powers WHERE id = ?", (cid,)).fetchone()
+        elif table == "class":
+            if "@" in cid:
+                cname, rid = cid.split("@", 1)
+            else:
+                cname, rid = cid, ""
+            row = db.conn.execute(
+                f"SELECT {field} FROM classes WHERE name = ? AND region_id = ?",
+                (cname, rid),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            values.append(int(row[0]))
+        except (TypeError, ValueError):
+            return None
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    if agg is None:
+        # 多 id 但没指明聚合 → 默认 min（最严苛，要全部满足）
+        agg = "min"
+    return _GATE_AGG_FUNCS[agg](values)
+
+
+def _gate_passed(gate: Dict[str, str], metrics: Dict[str, int], db: GameDB) -> bool:
+    """trigger_gate 全部条件满足才返回 True。条件形如 '<=240'。
+    key 形式见 _eval_gate_key。
+    """
+    for key, cond in gate.items():
         m = re.match(r"^(>=|<=|>|<|==)\s*(-?\d+)$", cond.strip())
         if not m:
             return False
         op, num = m.group(1), int(m.group(2))
-        val = int(metrics[metric])
+        val = _eval_gate_key(key, metrics, db)
+        if val is None:
+            return False
         if op == ">=" and not val >= num:
             return False
         if op == "<=" and not val <= num:
@@ -115,7 +199,7 @@ def gather_candidate_events(state: GameState, db: GameDB) -> List[Event]:
     for ev in c.seed_events:
         if ev.id in spawned:
             continue
-        if _gate_passed(ev.trigger_gate, state.metrics):
+        if _gate_passed(ev.trigger_gate, state.metrics, db):
             candidates.append(ev)
     return candidates
 
@@ -191,28 +275,30 @@ def event_to_issue(db: GameDB, state: GameState, ev: Event) -> Optional[int]:
     # 默认 ongoing + inertia 五档（+10/+5/0/-5/-10），按 kind 取
     ongoing: Dict[str, object] = {}
     inertia = -5
+    # 5 个原 metric（边防/民变/党争/执行/瞒报）已废除，ongoing_effects 按 kind 改用
+    # 民心/皇威 或留空让 LLM 在推进时自定。结构性影响由 region/army/external/class delta 承担。
     if ev.kind in ("天灾", "灾情", "饥荒"):
-        ongoing = {"metrics": {"民心": -2, "民变": 2}, "economy": [{"account": "国库", "delta": -8, "category": "赈济损耗", "reason": ev.title}]}
+        ongoing = {"metrics": {"民心": -2}, "economy": [{"account": "国库", "delta": -8, "category": "赈济损耗", "reason": ev.title}]}
         inertia = -10
-    elif ev.kind in ("人祸", "兵变", "流寇"):
-        ongoing = {"metrics": {"民变": 2, "瞒报": 1}}
+    elif ev.kind in ("人祸", "兵变", "流寇", "民变", "抗税"):
+        ongoing = {"metrics": {"民心": -2}}
         inertia = -10
     elif ev.kind in ("外族", "边事"):
-        ongoing = {"metrics": {"边防": -2}}
+        ongoing = {"metrics": {"皇威": -1}}
         inertia = -5
     elif ev.kind in ("党争", "朝议"):
-        ongoing = {"metrics": {"党争": 1}}
+        ongoing = {}
         inertia = -5
     elif ev.kind in ("丰收", "祥瑞", "民和"):
         ongoing = {"metrics": {"民心": 2}}
         inertia = +10
     elif ev.kind in ("友邦", "归附", "盟约"):
-        ongoing = {"metrics": {"边防": 1}}
+        ongoing = {"metrics": {"皇威": 1}}
         inertia = +5
     elif ev.kind in ("良策", "试点", "献宝", "科技"):
         inertia = +5
     elif ev.kind in ("战机", "敌乱"):
-        ongoing = {"metrics": {"边防": 1, "皇威": 1}}
+        ongoing = {"metrics": {"皇威": 1}}
         inertia = +10
     try:
         return db.insert_issue(
@@ -482,8 +568,9 @@ def apply_score_extraction(
     applied_metric = _apply_metric_dict(state, extracted.get("metric_delta") or {})
     # 2) economy_moves
     applied_economy = _apply_economy_list(db, state, extracted.get("economy_moves") or [])
-    # 3) faction_delta
+    # 3) faction_delta + class_delta（朝堂派系 + 社会阶级；联动靠 LLM，不在代码做）
     applied_factions = _apply_faction_dict(db, extracted.get("faction_delta") or {})
+    applied_classes = _apply_class_dict(db, extracted.get("class_delta") or {})
     # 4) region_delta / army_delta (复用旧 db 方法)
     region_deltas_raw = extracted.get("region_delta") or {}
     army_deltas_raw = extracted.get("army_delta") or {}
@@ -554,6 +641,7 @@ def apply_score_extraction(
         "metric_delta": applied_metric,
         "economy_moves": applied_economy,
         "faction_delta": applied_factions,
+        "class_delta": applied_classes,
         "region_changes": region_changes,
         "army_changes": army_changes,
         "external_changes": external_changes,

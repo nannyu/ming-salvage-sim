@@ -18,20 +18,22 @@
 - 本{{TURN_UNIT}}奏章原文（推演官写的邸报）
 - `decree_text`：皇帝本{{TURN_UNIT}}颁布的诏书全文
 - 当前 active issues 列表（id/title/bar_value/stage_text/cancellable/resolve_condition/fail_condition）
-- 当前盘面 metrics 与 economy、派系满意度
+- 当前盘面 metrics 与 economy、派系满意度、阶级满意度（全国汇总 + 各省切片）
 - `region_ids` / `army_ids` / `external_power_ids`：合法 id 表
+- `class_names`：合法阶级名表（如 `农民`/`士绅`/`官僚`/`军户`/`商人`/`匠户`/`宗藩`）
 - `candidate_events`：本{{TURN_UNIT}}候选情势清单（id/title）
 - `fiscal_config`：当前各财政系数
 
 ## 输出字段总表（每个字段的含义与约束，先看清这张表）
 
-顶层 12 个字段都**必须出现**；无内容的填空 `{}` 或 `[]`。严格 JSON，无 Markdown 无解释。
+顶层 13 个字段都**必须出现**；无内容的填空 `{}` 或 `[]`。严格 JSON，无 Markdown 无解释。
 
 | 字段 | 含义 | 约束 |
 |---|---|---|
-| `metric_delta` | 七量表本{{TURN_UNIT}}增量（民心/皇威/边防/民变/党争/执行/瞒报） | 增量非新值。±15 常规，±25 极端。以奏章「数值总览」段为权威。 |
+| `metric_delta` | 两量表本{{TURN_UNIT}}增量（民心/皇威）| 增量非新值。±15 常规，±25 极端。以奏章「数值总览」段为权威。其它原 metric（边防/民变/党争/执行/瞒报）已废除：边防 → 走 army_delta（morale/supply/training/equipment/arrears/loyalty）+ external_power_updates；民变 → 走 region_delta.unrest + class_delta.农民.satisfaction/leverage；党争 → 走 faction_delta；执行/瞒报 → 走叙事段（明示哪条被扭曲、哪桩未上达），不入数值。 |
 | `economy_moves` | 浮动收支（旨意执行/事件/赏罚/查抄/赈灾追加） | 每项 `account`(国库/内库)+`delta`+`category`+`reason`。单位万两（「国库263万两(-15)」→delta=-15）。`fixed_flows` 已落账的固定项（田赋/辽饷/盐税/商税/宗室禄米/百官俸禄/工部/赈灾/九边补给/各军军饷/皇庄/织造/矿税/宫廷/内廷俸/妃嫔）**不进这里**。 |
-| `faction_delta` | 派系满意度增量（阉党/皇党/军队/东林） | 增量非新值。 |
+| `faction_delta` | 派系满意度增量（阉党/皇党/军队/东林/宗室/中立/西学） | 增量非新值。±5 常规，±15 极端（极端手段如抄家屠戮）。 |
+| `class_delta` | 阶级满意度/影响力增量。key 形如 `农民` 表全国汇总；`农民@shaanxi` 表省级切片（region_id 从 `region_ids` 选） | value 形如 `{"satisfaction": -5, "leverage": +2}`，增量非新值。两字段都可写、可只写一个。**联动靠你自觉判**：①党派强推损某阶级利益 → 该阶级 sat 跌，且该党派 sat 也跟着跌（代言失职）；②东林 ↔ 江南士绅唇齿，抄江南/苏松士绅 → 东林 lev 同向掉，杀东林台谏 → 江南士绅 sat 同向掉；③阉党 ↔ 内廷宦官+地方税监同体，极端清算阉党时其代表阶级 sat+lev 双降；④军队 ↔ 军户/将门基本盘，欠饷军户 sat 长低 → 军队党 sat 也跌；⑤宗室党 ↔ 宗藩阶级同向（削宗禄/抄藩田同时损二者）；⑥极端手段（抄家屠戮）单次 ±20~40。阶级 sat≤30 且 lev≥60 易触发该省该阶级骚乱事件，由季末推演判定。 |
 | `region_delta` | 各地区数值变化，key=region_id | key **必须**从 `region_ids` 选。合法字段仅：量表 `public_support`/`unrest`/`grain_security`/`gentry_resistance`/`military_pressure`（±10、极端 ±20）、数量 `population`/`registered_land`/`hidden_land`/`tax_per_turn`、文字 `natural_disaster`/`human_disaster`/`status`。**减人口写 `population`，不是 `manpower`（`manpower` 是军队字段，严禁写入地区）。** 无变化填 `{}`。 |
 | `army_delta` | 各军数值变化，key=army_id | key **必须**从 `army_ids` 选。合法字段仅：量表 `supply`/`morale`/`training`/`equipment`/`arrears`/`mobility`/`loyalty`、数量 `manpower`/`maintenance_quarter`、文字 `station`/`commander`/`controller`/`troop_type`/`status`。**`cohesion` 是外部势力字段，严禁写入。** |
 | `external_power_updates` | 外部势力数值/状态变化，key=external_power_id | key **必须**从 `external_power_ids` 选。数值字段填**增量**（「兵势72→68」→-4）：`leverage`/`satisfaction`/`military_strength`/`cohesion`/`supply`；文字填**新值**：`leader`/`stance`/`agenda`/`status`/`last_action`。 |
@@ -65,7 +67,7 @@ new_issue 内部字段：`kind`(`initiative`/`situation`)、`title`、`origin_ki
 **不立局势**——以下三种不进 new_issues：
 - 诏书里顺带一句的次要措施，非独立工程（主诏「设火器营」，其「工部拨料」不单列）。
 - 与某条 active_issue 是同一件事 → 改写 `issue_advances`，不重复立。
-- **一锤子事**：一道旨当回合即办结、无多回合拉锯——拿人下狱、罢官夺职、准奏拨银、查抄已查实之产、申饬调将、平反某人。判据：「皇帝这道旨下去，下{{TURN_UNIT}}邸报会不会还在『推进中』？」会才立，不会则后果当回合直接落 `metric_delta`/`economy_moves`/`faction_delta`（「锦衣卫拿许显纯下诏狱」→皇威+、党争+，不留痕在待办）。
+- **一锤子事**：一道旨当回合即办结、无多回合拉锯——拿人下狱、罢官夺职、准奏拨银、查抄已查实之产、申饬调将、平反某人。判据：「皇帝这道旨下去，下{{TURN_UNIT}}邸报会不会还在『推进中』？」会才立，不会则后果当回合直接落 `metric_delta`/`economy_moves`/`faction_delta`（「锦衣卫拿许显纯下诏狱」→皇威+、阉党 sat-、东林 sat+，不留痕在待办）。
 
 decree new_issue 必填字段：
 - `stage_text`：第一句尽量摘 `decree_text` 诏书原句，后半句写当前阶段。
@@ -93,12 +95,17 @@ decree new_issue 必填字段：
 
 ```json
 {
-  "metric_delta": {"民心": -3, "皇威": 2, "边防": -1, "民变": 4, "党争": 3, "执行": 0, "瞒报": 1},
+  "metric_delta": {"民心": -3, "皇威": 2},
   "economy_moves": [
     {"account": "国库", "delta": -15, "category": "赈灾", "reason": "陕西延绥赈粮"},
     {"account": "内库", "delta": 8, "category": "查抄", "reason": "魏党田产追入"}
   ],
   "faction_delta": {"阉党": -5, "皇党": 3, "军队": 2, "东林": 4},
+  "class_delta": {
+    "农民@shaanxi": {"satisfaction": -6, "leverage": 5},
+    "士绅@nanzhili": {"satisfaction": -4},
+    "宗藩": {"satisfaction": -3}
+  },
   "region_delta": {"<region_id>": {"unrest": 5, "grain_security": -3, "reason": "..."}},
   "army_delta": {"<army_id>": {"morale": -3, "arrears": 5, "reason": "..."}},
   "external_power_updates": {
@@ -124,7 +131,7 @@ decree new_issue 必填字段：
       "resolve_condition": "火器营练成精兵五百以上，铸成红夷大炮十门并完成验放",
       "fail_condition": "试炮连续炸膛伤匠、户部停拨银两或保守派参劾撤局",
       "ongoing_effects": {"economy": [{"account": "国库", "delta": -5, "category": "火器营{{TURN_UNIT}}支", "reason": "匠师工银与药料"}]},
-      "effect_on_resolve": {"metrics": {"边防": 6, "皇威": 3}},
+      "effect_on_resolve": {"metrics": {"皇威": 3}, "armies": {"guanning": {"equipment": 6}}},
       "effect_on_fail": {"metrics": {"皇威": -4, "国库": -10}},
       "cancellable": "by_progress"
     },

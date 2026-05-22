@@ -45,7 +45,7 @@
     "resolve_condition": "关宁军欠饷补齐过半，宁锦防线整训完成，袁崇焕呈出可行之春战或固守方略并按期推进",
     "fail_condition": "关宁军欠饷激成兵变或将领私下勾结后金；宁锦防线丢失锦州/宁远任一要隘",
     "trigger_gate": {
-      "边防": "<=65"
+      "army.guanning.arrears": ">=65"
     }
   },
   {
@@ -68,7 +68,7 @@
       "王承恩"
     ],
     "resolve_condition": "京师米价回落至常价两成以内；开仓平粜或查抄囤户落到实处，民议平息",
-    "fail_condition": "京师粮价翻倍以上致民变或抢米；漕运彻底断绝两月以上",
+    "fail_condition": "京师粮价翻倍以上致抢米潮、京畿 unrest 飙升；漕运彻底断绝两月以上",
     "trigger_gate": {
       "民心": "<=44"
     }
@@ -95,7 +95,7 @@
     "resolve_condition": "陕西赈银、以工代赈、招抚客军三策并施，逃户回乡过半，王嘉胤等部就抚或解散",
     "fail_condition": "陕西流寇成股（万人以上）攻破州县；与晋豫流寇合流；驿卒大批投寇",
     "trigger_gate": {
-      "民变": ">=34"
+      "region.shaanxi.unrest": ">=70"
     }
   },
   {
@@ -120,7 +120,7 @@
     "resolve_condition": "朝鲜定期向皮岛输送米豆硫磺过半年，明朝默认协防义不外泄",
     "fail_condition": "密线为后金所探破，朝鲜被迫转投后金，皮岛失援",
     "trigger_gate": {
-      "边防": "<=60"
+      "external.houjin.leverage": ">=75"
     }
   },
   {
@@ -143,7 +143,7 @@
     "resolve_condition": "湖广漕粮足额抵京、米价继续走低，养京畿与边镇过冬",
     "fail_condition": "丰收余粮被盗匪劫掠或大户囤积，漕运未济，京中米价反涨",
     "trigger_gate": {
-      "民变": "<=32",
+      "region.huguang.grain_security": ">=80",
       "民心": ">=42"
     }
   },
@@ -168,7 +168,59 @@
     "resolve_condition": "派密线策反一旗主或贝勒，后金内乱半年以上不能合力南犯",
     "fail_condition": "皇太极清洗对手后内部更紧，反借机东征朝鲜或西讨蒙古以转移矛盾",
     "trigger_gate": {
-      "边防": "<=55"
+      "external.houjin.cohesion": "<=55"
+    }
+  },
+  {
+    "id": "north_three_uprising",
+    "title": "陕晋豫三省同起",
+    "kind": "民变",
+    "summary": "陕西、山西、河南三省同时上报流民聚众、攻城掠仓，州县告急文书塞满通政司。",
+    "urgency": 90,
+    "severity": 92,
+    "credibility": 72,
+    "interests": [
+      "百姓",
+      "地方官",
+      "边军",
+      "宗藩",
+      "户部"
+    ],
+    "audiences": [
+      "韩爌",
+      "毕自严",
+      "袁崇焕",
+      "孙承宗"
+    ],
+    "resolve_condition": "三省 unrest 至少有两省回落至 60 以下；招抚或剿灭李自成/张献忠主力之一；调拨百万级赈粮入境",
+    "fail_condition": "三省全境失守，洛阳、开封、太原任一被破，宗藩被掳，朝廷失去北方腹地",
+    "trigger_gate": {
+      "region.shaanxi|shanxi|henan.unrest.min": ">=65"
+    }
+  },
+  {
+    "id": "jiangnan_gentry_revolt",
+    "title": "江南士绅串联抗册",
+    "kind": "抗税",
+    "summary": "南直、浙江、福建士绅以书院为节点串联，联名上疏抗清丈、罢交辽饷，南京科道交章。",
+    "urgency": 75,
+    "severity": 78,
+    "credibility": 68,
+    "interests": [
+      "士绅",
+      "东林",
+      "户部",
+      "南京"
+    ],
+    "audiences": [
+      "韩爌",
+      "毕自严",
+      "王承恩"
+    ],
+    "resolve_condition": "罢清丈或减额加征，或拿江南数家大户立威迫其余就范，南方钱粮恢复输京",
+    "fail_condition": "南方拒缴钱粮过两季，京中军饷断流，东林朝官集体辞官护乡",
+    "trigger_gate": {
+      "class.士绅@nanzhili|zhejiang|fujian.satisfaction.max": "<=30"
     }
   }
 ]

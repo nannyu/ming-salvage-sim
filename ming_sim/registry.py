@@ -41,7 +41,7 @@ def build_court_brief(context: CourtContext) -> str:
     )
     score_line = "；".join(
         f"{k}{metrics[k]}"
-        for k in ("民心", "皇威", "边防", "民变", "党争", "执行", "瞒报")
+        for k in ("民心", "皇威")
         if k in metrics
     )
     issues = context.db.list_active_issues()
@@ -100,6 +100,7 @@ def create_minister_agent(
         tools=build_minister_tools(character, context),
         add_history_to_context=True,
         num_history_runs=6,
+        tool_call_limit=5,
         markdown=False,
     )
 

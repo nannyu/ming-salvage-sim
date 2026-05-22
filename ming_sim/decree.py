@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from agno.db.sqlite import SqliteDb
 
@@ -76,7 +76,15 @@ def resolve_directives(
     directives: List[sqlite3.Row],
     decree_text: str,
     deaths_this_turn: Optional[List[Dict[str, str]]] = None,
+    on_event: Optional[Callable[[str, str], None]] = None,
 ) -> str:
+    """on_event(kind, data): 推演过程实时回调。
+    kind ∈ {stage, thinking, text}；stage 携带阶段名，thinking/text 携带增量片段。
+    """
+    def _emit(kind: str, data: str) -> None:
+        if on_event:
+            on_event(kind, data)
+
     if not directives:
         advance_without_edict(state, db)
         return f"本{TURN_UNIT}未颁正式诏书。"
@@ -94,17 +102,21 @@ def resolve_directives(
 
     # 1.5) 固定月度财政 tick（田赋/辽饷/军饷等，在 LLM 推演前落账）
     tlog("结算 1/4 固定月度财政 tick")
+    _emit("stage", "固定月度财政入账")
     fixed_flows = apply_fixed_period_flows(db, state)
 
     # 2) 推演 agent: 写邸报
     tlog("结算 2/4 推演 agent（月末邸报）")
+    _emit("stage", "推演月末邸报")
     previous_narrative = db.previous_turn_summary(state) or ""
-    simulator = create_season_simulator_agent(llm_config, agno_db)
+    simulator = create_season_simulator_agent(llm_config, agno_db, state=state, db=db)
     try:
         narrative = simulate_season_with_agno(
             simulator, state, db, decree_text, directives_brief, previous_narrative,
             fixed_flows=fixed_flows,
             deaths_this_turn=deaths_this_turn,
+            on_thinking=lambda c: _emit("thinking", c),
+            on_text=lambda c: _emit("text", c),
         )
     except Exception as exc:
         print(f"[WARN] 推演 agent 失败：{exc}；本{TURN_UNIT}用简化邸报兜底，跳过 LLM 结算。")
@@ -128,6 +140,7 @@ def resolve_directives(
 
     # 3) 结算 agent: 读邸报抽 JSON
     tlog("结算 3/4 结算 agent（抽 JSON）")
+    _emit("stage", "抽取数值结算")
     extractor = create_score_extractor_agent(llm_config, agno_db)
     sanitizer = create_json_sanitizer_agent(llm_config, agno_db)
     extractor_input = ""
@@ -142,6 +155,7 @@ def resolve_directives(
         extractor_output = f"[抽取失败] {exc}"
 
     tlog("结算 4/4 落库 + inertia/ongoing")
+    _emit("stage", "落库与事项推进")
     applied = apply_score_extraction(db, state, extracted)
 
     # 4) 把 narrative 与诏书写入 turn_logs 作下月前文

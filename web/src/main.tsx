@@ -414,7 +414,9 @@ function App() {
   const [report, setReport] = React.useState("");
   const [busy, setBusy] = React.useState("");
   const [error, setError] = React.useState("");
-  const [settlementStages, setSettlementStages] = React.useState<string[]>([]);
+  const [settleStage, setSettleStage] = React.useState("");
+  const [settleThinking, setSettleThinking] = React.useState("");
+  const [settleNarrative, setSettleNarrative] = React.useState("");
   const [closedShown, setClosedShown] = React.useState<number>(() => {
     const raw = sessionStorage.getItem("closedShownTurn");
     return raw ? Number(raw) : -1;
@@ -681,16 +683,61 @@ function App() {
 
   const issueDecree = async () => {
     setBusy("月末结算");
-    setSettlementStages(["解析圣旨", "评估执行", "钱粮入账", "地区变化", "军队变化", "生成月末奏章"]);
+    setSettleStage("");
+    setSettleThinking("");
+    setSettleNarrative("");
     setError("");
     try {
-      await api<{ decree: string; report: string; stages: string[]; state: GameState }>("/api/decree/issue", { method: "POST" });
-      // 结算后强制整页刷新：草案/对话/局势/closed 弹窗全部按新 state 重新初始化，避免 UI 残留
+      const response = await fetch("/api/decree/issue/stream", { method: "POST" });
+      if (!response.ok || !response.body) {
+        throw new Error(`颁诏失败：HTTP ${response.status}`);
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let done = false;
+      let failed = "";
+      while (!done) {
+        const { value, done: streamDone } = await reader.read();
+        if (streamDone) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE 事件以空行分隔
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() || "";
+        for (const block of blocks) {
+          let evName = "";
+          let dataRaw = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) evName = line.slice(7).trim();
+            else if (line.startsWith("data: ")) dataRaw += line.slice(6);
+          }
+          if (!evName || !dataRaw) continue;
+          let data: { content?: string; message?: string } = {};
+          try { data = JSON.parse(dataRaw); } catch { continue; }
+          if (evName === "stage") {
+            setSettleStage(data.content || "");
+          } else if (evName === "thinking") {
+            setSettleThinking((prev) => prev + (data.content || ""));
+          } else if (evName === "text") {
+            setSettleNarrative((prev) => prev + (data.content || ""));
+          } else if (evName === "error") {
+            failed = data.message || "颁诏失败。";
+            done = true;
+          } else if (evName === "done") {
+            done = true;
+          }
+        }
+      }
+      if (failed) {
+        setError(failed);
+        setBusy("");
+        return;
+      }
+      // 结算完成：强制整页刷新，草案/对话/局势/closed 弹窗全部按新 state 重新初始化
       window.location.reload();
       return;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-    } finally {
       setBusy("");
     }
   };
@@ -776,7 +823,6 @@ function App() {
             report={report}
             busy={busy}
             error={error}
-            settlementStages={settlementStages}
             onDirectiveTextChange={setDirectiveText}
             onEditingTextChange={setEditingDirectiveText}
             onCreateDirective={createDirective}
@@ -804,12 +850,28 @@ function App() {
         <ClosedIssuesModal items={closedModal} onClose={() => setClosedModal([])} />
       ) : null}
 
-      {settling ? <SettlementLock stages={settlementStages} /> : null}
+      {settling ? (
+        <SettlementLock
+          stage={settleStage}
+          thinking={settleThinking}
+          narrative={settleNarrative}
+        />
+      ) : null}
     </main>
   );
 }
 
-function SettlementLock({ stages }: { stages: string[] }) {
+function SettlementLock({
+  stage,
+  thinking,
+  narrative,
+}: {
+  stage: string;
+  thinking: string;
+  narrative: string;
+}) {
+  const thinkRef = React.useRef<HTMLDivElement>(null);
+  const narrRef = React.useRef<HTMLDivElement>(null);
   React.useEffect(() => {
     const block = (event: KeyboardEvent) => {
       event.preventDefault();
@@ -818,16 +880,34 @@ function SettlementLock({ stages }: { stages: string[] }) {
     window.addEventListener("keydown", block, true);
     return () => window.removeEventListener("keydown", block, true);
   }, []);
+  // 流式内容到达时自动滚到底
+  React.useEffect(() => {
+    if (thinkRef.current) thinkRef.current.scrollTop = thinkRef.current.scrollHeight;
+  }, [thinking]);
+  React.useEffect(() => {
+    if (narrRef.current) narrRef.current.scrollTop = narrRef.current.scrollHeight;
+  }, [narrative]);
   return (
     <div className="settlement-lock" role="alertdialog" aria-modal="true" aria-label="月末结算">
       <div className="settlement-lock-card">
         <Loader2 className="settlement-spin" size={28} />
         <h2>月末结算中</h2>
-        <p>朝廷推演钱粮、地方、军务，请勿操作。</p>
-        {stages.length > 0 && (
-          <ol className="settlement-lock-stages">
-            {stages.map((stage) => <li key={stage}>{stage}</li>)}
-          </ol>
+        <p>{stage ? `当前：${stage}` : "朝廷推演钱粮、地方、军务，请勿操作。"}</p>
+        {thinking && (
+          <div className="settlement-stream-block">
+            <div className="settlement-stream-label">邸报房推敲</div>
+            <div className="settlement-stream-text settlement-thinking" ref={thinkRef}>
+              {thinking}
+            </div>
+          </div>
+        )}
+        {narrative && (
+          <div className="settlement-stream-block">
+            <div className="settlement-stream-label">月末奏章</div>
+            <div className="settlement-stream-text settlement-narrative" ref={narrRef}>
+              {narrative}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -911,7 +991,7 @@ function CourtDrawer({
 }
 
 function TopStatusBar({ state, onOpenState }: { state: GameState; onOpenState: () => void }) {
-  const scoreKeys = ["民心", "皇威", "边防", "民变", "党争", "执行"];
+  const scoreKeys = ["民心", "皇威"];
   return (
     <header className="status-bar" aria-label="国势状态栏">
       <button className="status-emblem" onClick={onOpenState}>
@@ -922,7 +1002,7 @@ function TopStatusBar({ state, onOpenState }: { state: GameState; onOpenState: (
         <BudgetHover accountName="国库" budget={state.budget["国库"]} />
         <BudgetHover accountName="内库" budget={state.budget["内库"]} />
         {scoreKeys.map((key) => (
-          <span className={`status-pill ${scoreTone(state.metrics[key], ["边防", "民变", "党争"].includes(key))}`} key={key}>
+          <span className={`status-pill ${scoreTone(state.metrics[key], false)}`} key={key}>
             {key} <b>{state.metrics[key]}</b>
           </span>
         ))}
@@ -1659,7 +1739,6 @@ function EdictModal({
   report,
   busy,
   error,
-  settlementStages,
   onDirectiveTextChange,
   onEditingTextChange,
   onCreateDirective,
@@ -1680,7 +1759,6 @@ function EdictModal({
   report: string;
   busy: string;
   error: string;
-  settlementStages: string[];
   onDirectiveTextChange: (value: string) => void;
   onEditingTextChange: (value: string) => void;
   onCreateDirective: () => void;
@@ -1768,11 +1846,6 @@ function EdictModal({
       <section className="modal-pane settlement-box">
         <h2>诏书与奏章</h2>
         {busy && <div className="busy-line"><Loader2 size={15} />{busy}...</div>}
-        {settlementStages.length > 0 && (
-          <ol>
-            {settlementStages.map((stage) => <li key={stage}>{stage}</li>)}
-          </ol>
-        )}
         {error && <div className="error-line" role="alert">{error}</div>}
         {decree || report ? (
           <pre>{`${decree || ""}${report ? `\n\n${report}` : ""}`}</pre>

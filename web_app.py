@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import random
+import threading
 from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -588,14 +590,60 @@ async def api_write_decree() -> Dict[str, Any]:
 
 @app.post("/api/decree/issue")
 async def api_issue_decree() -> Dict[str, Any]:
-    stages = ["解析圣旨", "评估执行", "钱粮入账", "地区变化", "军队变化", "生成月末奏章"]
+    """非流式颁诏（保留兼容）。前端默认走 /api/decree/issue/stream。"""
     try:
         report = web_game.session.resolve_turn()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from None
     decree = web_game.session.last_decree
     web_game.refresh_turn()
-    return {"decree": decree, "report": report, "stages": stages, "state": web_game.state_payload()}
+    return {"decree": decree, "report": report, "state": web_game.state_payload()}
+
+
+@app.post("/api/decree/issue/stream")
+async def api_issue_decree_stream() -> StreamingResponse:
+    """流式颁诏：推演过程（阶段/思考/正文）实时 SSE 推给前端。
+
+    resolve_turn 是阻塞的同步调用，且 on_event 是 push 式回调。
+    用 worker 线程跑 resolve_turn，回调把事件投进 Queue；
+    async generator 从 Queue 拉事件转成 SSE。
+    """
+    ev_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+
+    def on_event(kind: str, data: str) -> None:
+        ev_queue.put((kind, data))
+
+    def worker() -> None:
+        try:
+            report = web_game.session.resolve_turn(on_event=on_event)
+            decree = web_game.session.last_decree
+            web_game.refresh_turn()
+            ev_queue.put(("__done__", {
+                "decree": decree,
+                "report": report,
+                "state": web_game.state_payload(),
+            }))
+        except ValueError as e:
+            ev_queue.put(("__error__", str(e)))
+        except Exception as e:  # noqa: BLE001
+            ev_queue.put(("__error__", str(e)))
+
+    async def generate() -> AsyncIterator[str]:
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        loop = asyncio.get_running_loop()
+        while True:
+            kind, data = await loop.run_in_executor(None, ev_queue.get)
+            if kind == "__done__":
+                yield sse_event("done", data)
+                break
+            if kind == "__error__":
+                yield sse_event("error", {"message": data})
+                break
+            # stage / thinking / text
+            yield sse_event(kind, {"content": data})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 if os.path.isdir(WEB_DIST):

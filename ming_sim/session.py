@@ -259,8 +259,11 @@ class GameSession:
         self.last_decree = decree
         return decree
 
-    def resolve_turn(self, decree: str = "") -> str:
-        """颁诏并推演本回合。要求无 pending 残留、≥1 条 draft。"""
+    def resolve_turn(self, decree: str = "", on_event=None) -> str:
+        """颁诏并推演本回合。要求无 pending 残留、≥1 条 draft。
+
+        on_event(kind, data): 推演过程实时回调，透传给 resolve_directives。
+        """
         if self.pending_count() > 0:
             raise ValueError(f"尚有 {self.pending_count()} 道大臣拟旨待陛下核定（准/驳），不能颁诏。")
         directives = self.db.list_directives(self.state, statuses=("draft",))
@@ -272,6 +275,7 @@ class GameSession:
         report = resolve_directives(
             self.state, self.db, self.agno_db, self.llm_config,
             directives, decree_text, deaths_this_turn=self.deaths_this_turn,
+            on_event=on_event,
         )
         self.last_report = report
         self.last_decree = decree_text

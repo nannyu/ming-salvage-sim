@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
@@ -19,8 +19,9 @@ from ming_sim.content import GameContent
 from ming_sim.exceptions import LLMContractError, LLMUnavailable
 from ming_sim.llm_contract import abort_llm_contract, fail_if_llm_error
 from ming_sim.llm_model import create_chat_model, extract_agent_text
-from ming_sim.models import LLMConfig
+from ming_sim.models import CourtContext, GameState, LLMConfig
 from ming_sim.token_stats import tlog
+from ming_sim.tools import build_simulator_tools
 
 _content: Optional[GameContent] = None
 
@@ -47,8 +48,18 @@ def run_agent_text(agent: Agent, prompt: str, tag: str) -> str:
     return text
 
 
-def run_agent_stream_text(agent: Agent, prompt: str, tag: str) -> str:
-    """流式跑 agent，按事件实时打到 stdout（带毫秒时间戳），最终返回拼合后的纯文本。"""
+def run_agent_stream_text(
+    agent: Agent,
+    prompt: str,
+    tag: str,
+    on_thinking: Optional[Callable[[str], None]] = None,
+    on_text: Optional[Callable[[str], None]] = None,
+) -> str:
+    """流式跑 agent，按事件实时打到 stdout（带毫秒时间戳），最终返回拼合后的纯文本。
+
+    on_thinking(chunk): 每次思考片段到达时回调（可选）。
+    on_text(chunk): 每次正文增量到达时回调（可选）。
+    """
     tlog(f"[{tag}] 开始流式推演（首字到达前可能等几秒）")
     pieces: List[str] = []
     final_output = None
@@ -58,29 +69,43 @@ def run_agent_stream_text(agent: Agent, prompt: str, tag: str) -> str:
     try:
         stream = agent.run(prompt, stream=True, stream_events=True)
     except TypeError:
-        # fallback: 老版本 agno 不支持 stream 参数
         tlog(f"[{tag}] 当前 agno 不支持 stream，退回普通 run")
-        return extract_agent_text(agent.run(prompt))
+        text = extract_agent_text(agent.run(prompt))
+        if on_text:
+            on_text(text)
+        return text
 
     reasoning_buf: List[str] = []
     reasoning_chars_since_flush = 0
     reasoning_last_print = time.monotonic()
+    tool_calls = 0
     for event in stream:
         ev_type = type(event).__name__
-        # 思考过程 (qwen reasoning_content)
+        # 工具调用事件：记日志 + 把「正在查 X」作为思考片段推给前端
+        if ev_type == "ToolCallStartedEvent":
+            tool = getattr(event, "tool", None)
+            tname = getattr(tool, "tool_name", "?") if tool else "?"
+            targs = getattr(tool, "tool_args", {}) if tool else {}
+            tool_calls += 1
+            tlog(f"[{tag}/工具] 调用 {tname}({targs})")
+            if on_thinking:
+                on_thinking(f"\n〔查阅 {tname} {targs}〕\n")
+            continue
+        if ev_type == "ToolCallCompletedEvent":
+            continue
         rdelta = getattr(event, "reasoning_content", None)
         if isinstance(rdelta, str) and rdelta:
             reasoning_buf.append(rdelta)
             reasoning_chars_since_flush += len(rdelta)
             now = time.monotonic()
             if reasoning_chars_since_flush >= 120 or (now - reasoning_last_print) >= 1.5:
-                merged = "".join(reasoning_buf).replace("\n", " ⏎ ")
-                tlog(f"[{tag}/思考] {merged[-200:]}")
+                merged = "".join(reasoning_buf)
+                tlog(f"[{tag}/思考] {merged.replace(chr(10), ' ⏎ ')[-200:]}")
+                if on_thinking:
+                    on_thinking(merged)
                 reasoning_buf.clear()
                 reasoning_chars_since_flush = 0
                 reasoning_last_print = now
-        # 终结事件（RunOutput / RunCompletedEvent / is_final）的 content 是「累计全文」，
-        # 不是增量 delta；若也 append 进 pieces 会把整篇重复一遍。先识别并 continue 掉。
         is_terminal = (
             (hasattr(event, "is_final") and getattr(event, "is_final", False))
             or ev_type in ("RunOutput", "RunCompletedEvent")
@@ -95,6 +120,8 @@ def run_agent_stream_text(agent: Agent, prompt: str, tag: str) -> str:
             pieces.append(delta)
             chunk_buf.append(delta)
             chars_since_flush += len(delta)
+            if on_text:
+                on_text(delta)
             now = time.monotonic()
             if chars_since_flush >= 80 or (now - last_print) >= 1.0:
                 merged = "".join(chunk_buf).replace("\n", " ⏎ ")
@@ -104,13 +131,14 @@ def run_agent_stream_text(agent: Agent, prompt: str, tag: str) -> str:
                 last_print = now
 
     if reasoning_buf:
-        merged = "".join(reasoning_buf).replace("\n", " ⏎ ")
-        tlog(f"[{tag}/思考] {merged[-200:]}")
+        merged = "".join(reasoning_buf)
+        tlog(f"[{tag}/思考] {merged.replace(chr(10), ' ⏎ ')[-200:]}")
+        if on_thinking:
+            on_thinking(merged)
     if chunk_buf:
         merged = "".join(chunk_buf).replace("\n", " ⏎ ")
         tlog(f"[{tag}] …{merged[-160:]}")
 
-    # 优先用流式累计的 pieces（增量 delta 拼成全文）；它为空才退回终结事件的 content。
     streamed = "".join(pieces).strip()
     if streamed:
         text = streamed
@@ -119,7 +147,7 @@ def run_agent_stream_text(agent: Agent, prompt: str, tag: str) -> str:
         text = extract_agent_text(final_output)
     else:
         abort_llm_contract(tag, "流式无内容且无终结事件", "")
-    tlog(f"[{tag}] 完成，{len(text)} 字")
+    tlog(f"[{tag}] 完成，{len(text)} 字，工具调用 {tool_calls} 次")
     return text
 
 
@@ -204,7 +232,20 @@ def create_decree_writer_agent(llm_config: LLMConfig, agno_db: SqliteDb) -> Agen
     )
 
 
-def create_season_simulator_agent(llm_config: LLMConfig, agno_db: SqliteDb) -> Agent:
+def create_season_simulator_agent(
+    llm_config: LLMConfig,
+    agno_db: SqliteDb,
+    state: Optional[GameState] = None,
+    db: Optional[object] = None,
+) -> Agent:
+    """月末推演日讲官。
+
+    传入 state+db 时装备只读查询工具（view_state/list_regions/inspect_army 等），
+    推演官可按需查实时盘面，让月末邸报有据。两者缺一则不挂工具（兼容旧调用）。
+    """
+    tools = None
+    if state is not None and db is not None:
+        tools = build_simulator_tools(CourtContext(state=state, db=db))
     return Agent(
         name="月末推演日讲官",
         id="season-simulator",
@@ -212,6 +253,8 @@ def create_season_simulator_agent(llm_config: LLMConfig, agno_db: SqliteDb) -> A
         db=agno_db,
         model=create_chat_model(llm_config, temperature=0.9, top_p=0.95, max_tokens=4500, enable_thinking=True),
         instructions=[_ctx().game_world_prompt, _ctx().season_simulator_prompt],
+        tools=tools,
+        tool_call_limit=16 if tools else None,
         add_history_to_context=False,
         markdown=False,
     )

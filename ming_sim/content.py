@@ -19,7 +19,7 @@ from ming_sim.assets import (
     str_field,
     string_list,
 )
-from ming_sim.models import Army, Character, Event, ExternalPower, Faction, Region
+from ming_sim.models import Army, Character, Event, ExternalPower, Faction, Region, SocialClass
 
 
 # --- 单项加载器（保留原签名，便于复用与单测）---
@@ -75,8 +75,11 @@ def load_event_content(filename: str = "events.json") -> List[Event]:
             )
         gate_raw = item.get("trigger_gate") or {}
         if not isinstance(gate_raw, dict):
-            raise SystemExit(f"{filename}[{idx}] trigger_gate 必须是对象（metric→比较式）。")
+            raise SystemExit(f"{filename}[{idx}] trigger_gate 必须是对象（key→比较式）。")
         trigger_gate: Dict[str, str] = {}
+        # key 形式见 issues._eval_gate_key：metric 名、region.<id>.<field>、army.<id>.<field>、
+        # external.<id>.<field>、class.<name>[@<region>].<field>，多 id 用 | 分隔时末段 .<agg>(max/min/avg/sum)。
+        # 这里只校验比较式格式，key 形式由求值器在 runtime 校验（id/field 存不存在）。
         for mk, mv in gate_raw.items():
             cond = str(mv).strip()
             if not re.match(r"^(>=|<=|>|<|==)\s*-?\d+$", cond):
@@ -165,6 +168,30 @@ def load_army_content() -> Dict[str, Army]:
     if not armies:
         raise SystemExit("armies.json 必须至少定义一支军队。")
     return armies
+
+
+def load_class_content() -> Dict[str, SocialClass]:
+    """阶级人口设定。key = "name@region_id"（region_id 为空则 key="name"）。"""
+    data = require_dict(load_json_asset("classes.json"), "classes.json")
+    classes: Dict[str, SocialClass] = {}
+    for idx, raw in enumerate(require_list(data.get("classes"), "classes.json.classes"), 1):
+        item = require_dict(raw, f"classes.json.classes[{idx}]")
+        name = str_field(item, "name", f"classes.json.classes[{idx}]")
+        region_id = str(item.get("region_id") or "").strip()
+        key = f"{name}@{region_id}" if region_id else name
+        if key in classes:
+            raise SystemExit(f"classes.json 重复条目：{key}")
+        classes[key] = SocialClass(
+            name=name,
+            region_id=region_id,
+            population=int_field(item, "population", f"classes.json.classes[{idx}]"),
+            satisfaction=int_field(item, "satisfaction", f"classes.json.classes[{idx}]"),
+            leverage=int_field(item, "leverage", f"classes.json.classes[{idx}]"),
+            agenda=str_field(item, "agenda", f"classes.json.classes[{idx}]"),
+        )
+    if not classes:
+        raise SystemExit("classes.json 必须至少定义一个阶级条目。")
+    return classes
 
 
 def load_external_powers() -> Dict[str, ExternalPower]:
@@ -293,6 +320,7 @@ class GameContent:
     armies: Dict[str, Army] = field(default_factory=dict)
     faction_metrics: Tuple[str, ...] = ()
     external_powers: Dict[str, ExternalPower] = field(default_factory=dict)
+    classes: Dict[str, SocialClass] = field(default_factory=dict)
 
     # skill 体系（load_skill_content 十元组）
     office_skills: Dict[str, List[str]] = field(default_factory=dict)
@@ -322,6 +350,7 @@ class GameContent:
         regions = load_region_content()
         armies = load_army_content()
         external_powers = load_external_powers()
+        classes = load_class_content()
         (
             office_skills_data,
             skill_catalog,
@@ -344,6 +373,7 @@ class GameContent:
             armies=armies,
             faction_metrics=tuple(factions.keys()),
             external_powers=external_powers,
+            classes=classes,
             office_skills=office_skills_data,
             skill_catalog=skill_catalog,
             office_default_skills=office_default_skills,

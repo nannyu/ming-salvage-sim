@@ -8,9 +8,9 @@ from ming_sim.constants import TURN_UNIT
 from ming_sim.db import GameDB
 from ming_sim.models import GameState, monthly_amount
 
-ISSUE_METRIC_KEYS = {"民心", "皇威", "边防", "民变", "党争", "执行", "瞒报"}
+ISSUE_METRIC_KEYS = {"民心", "皇威"}
 ISSUE_METRIC_LOCK_CAPS = {
-    "民心": 8, "皇威": 5, "边防": 6, "民变": 8, "党争": 8, "执行": 6, "瞒报": 6,
+    "民心": 8, "皇威": 5,
 }
 
 ARMY_SALARY_PRIORITY = [
@@ -184,4 +184,31 @@ def _apply_faction_dict(db: GameDB, faction_delta: Dict[str, object]) -> Dict[st
         cleaned[key] = d
     if cleaned:
         db.adjust_factions(cleaned)
+    return cleaned
+
+
+def _apply_class_dict(db: GameDB, class_delta: Dict[str, object]) -> Dict[str, Dict[str, int]]:
+    """class_delta 结构：{ '农民@shaanxi': {'satisfaction': -5, 'leverage': +3}, '士绅': {...} }
+    key 不带 @ 默认全国汇总。字段只接 satisfaction / leverage 增量。
+    """
+    cleaned: Dict[str, Dict[str, int]] = {}
+    for key, fields in (class_delta or {}).items():
+        if not isinstance(fields, dict):
+            continue
+        entry: Dict[str, int] = {}
+        for fname in ("satisfaction", "leverage"):
+            raw = fields.get(fname)
+            if raw is None:
+                continue
+            try:
+                d = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if d == 0:
+                continue
+            entry[fname] = d
+        if entry:
+            cleaned[str(key)] = entry
+    if cleaned:
+        db.adjust_classes(cleaned)
     return cleaned

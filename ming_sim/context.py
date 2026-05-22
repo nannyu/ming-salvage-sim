@@ -56,41 +56,58 @@ def historical_anchor_for_month(year: int, month: int) -> Dict[str, object]:
 
 
 def victory_status(db: GameDB, state: GameState) -> Dict[str, object]:
+    """胜负判定：原依赖 边防/民变 metric，已删；改用 external_powers / armies / regions / classes
+    直接数据。
+    - 后金综合 = leverage + military_strength + cohesion + supply
+    - 明辽东防线综合 = 关宁(morale+supply+training+equipment-arrears) + 山海关同式 + (100 - beizhili.military_pressure)
+    - 北方民变综合 = 陕晋豫三省 unrest 平均；农民阶级三省 sat 平均（低=惨）
+    """
     houjin = db.conn.execute("SELECT * FROM external_powers WHERE id = 'houjin'").fetchone()
     if houjin is None:
         return {"status": "ongoing", "summary": "后金未建档。"}
-    border = int(state.metrics.get("边防", 0))
-    rebellion = int(state.metrics.get("民变", 0))
     treasury = int(state.metrics.get("国库", 0))
     guanning = db.conn.execute("SELECT * FROM armies WHERE id = 'guanning'").fetchone()
     shanhaiguan = db.conn.execute("SELECT * FROM armies WHERE id = 'shanhaiguan'").fetchone()
     beizhili = db.conn.execute("SELECT * FROM regions WHERE id = 'beizhili'").fetchone()
     houjin_power = int(houjin["leverage"]) + int(houjin["military_strength"]) + int(houjin["cohesion"]) + int(houjin["supply"])
-    ming_front = border
+    ming_front = 0
     if guanning:
         ming_front += int(guanning["morale"]) + int(guanning["supply"]) + int(guanning["training"]) + int(guanning["equipment"]) - int(guanning["arrears"])
     if shanhaiguan:
         ming_front += int(shanhaiguan["morale"]) + int(shanhaiguan["supply"]) + int(shanhaiguan["training"]) + int(shanhaiguan["equipment"]) - int(shanhaiguan["arrears"])
     if beizhili:
         ming_front += max(0, 100 - int(beizhili["military_pressure"]))
-    if (houjin_power <= 120 and ming_front >= 360 and border <= 55) or (houjin_power <= 80 and ming_front >= 400):
+    # 京畿压力 = beizhili.military_pressure（高=后金兵临城下）
+    beizhili_pressure = int(beizhili["military_pressure"]) if beizhili else 0
+    # 北方三省民变综合
+    north_rows = db.conn.execute(
+        "SELECT unrest FROM regions WHERE id IN ('shaanxi','shanxi','henan')"
+    ).fetchall()
+    north_unrest_avg = sum(int(r["unrest"]) for r in north_rows) // max(1, len(north_rows)) if north_rows else 0
+    # 北方三省农民阶级 sat
+    peasant_rows = db.conn.execute(
+        "SELECT satisfaction FROM classes WHERE name='农民' AND region_id IN ('shaanxi','shanxi','henan')"
+    ).fetchall()
+    peasant_sat_avg = sum(int(r["satisfaction"]) for r in peasant_rows) // max(1, len(peasant_rows)) if peasant_rows else 50
+
+    if (houjin_power <= 120 and ming_front >= 300 and beizhili_pressure <= 35) or (houjin_power <= 80 and ming_front >= 340):
         return {
             "status": "ming_victory",
             "summary": "后金兵势、内聚与粮饷已被压到低位，关宁与山海关形成稳定优势，辽东威胁被解除。",
         }
-    if int(houjin["leverage"]) >= 92 and int(houjin["military_strength"]) >= 82 and border >= 86:
+    if int(houjin["leverage"]) >= 92 and int(houjin["military_strength"]) >= 82 and beizhili_pressure >= 85:
         return {
             "status": "qing_victory",
-            "summary": "后金/清兵势压倒辽东与京畿，边防崩坏，大明已失去扭转清势的窗口。",
+            "summary": "后金/清兵势压倒辽东与京畿，京畿告急，大明已失去扭转清势的窗口。",
         }
-    if treasury <= 0 and rebellion >= 88 and border >= 78:
+    if treasury <= 0 and north_unrest_avg >= 85 and peasant_sat_avg <= 12 and beizhili_pressure >= 70:
         return {
             "status": "qing_victory",
-            "summary": "国库断绝、民变与边患同涨，大明无力同时支撑内剿与辽东防线。",
+            "summary": "国库断绝、陕晋豫三省民变与辽东边患同涨，大明无力同时支撑内剿与辽东防线。",
         }
     return {
         "status": "ongoing",
-        "summary": f"对清战局未决：后金综合{houjin_power}，明辽东防线综合{ming_front}。",
+        "summary": f"对清战局未决：后金综合{houjin_power}，明辽东防线综合{ming_front}，京畿压力{beizhili_pressure}，北方民变{north_unrest_avg}。",
     }
 
 

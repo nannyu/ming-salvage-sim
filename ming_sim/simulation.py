@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from agno.agent import Agent
 
@@ -25,6 +25,8 @@ def simulate_season_with_agno(
     previous_narrative: str,
     fixed_flows: Optional[List[Dict[str, object]]] = None,
     deaths_this_turn: Optional[List[Dict[str, str]]] = None,
+    on_thinking: Optional[Callable[[str], None]] = None,
+    on_text: Optional[Callable[[str], None]] = None,
 ) -> str:
     """推演 agent: 输入一坨,输出一篇邸报纯文字。"""
     active = db.list_active_issues()
@@ -46,29 +48,42 @@ def simulate_season_with_agno(
         }
         for ev in gather_candidate_events(state, db)
     ]
+    # payload 只给「大概情况」——核心数值 + 摘要字符串 + 计数。
+    # 地区/军队/派系/阶级的细节不塞全量快照，逼推演官按需调 tool 查实时数据。
+    region_count = db.conn.execute("SELECT COUNT(*) AS c FROM regions").fetchone()["c"]
+    army_count = db.conn.execute("SELECT COUNT(*) AS c FROM armies").fetchone()["c"]
     payload = {
         "year": state.year,
         "period": state.period,
         "decree_text": decree_text,
         "directives": directives_brief,
         "current_state": dict(state.metrics),
-        "treasury": db.treasury_report(state),
-        "factions": db.faction_report(),
+        "treasury_brief": db.treasury_report(state),
+        "factions_brief": db.faction_report(),
         "active_issues": issues_payload,
         "candidate_events": candidate_events,
         "previous_narrative_tail": previous_narrative[-1500:] if previous_narrative else "",
-        "external_powers": db.external_power_payload(),
+        "external_powers_brief": db.external_power_report(),
         "historical_anchor": historical_anchor_for_month(state.year, state.period),
         "victory_status": victory_status(db, state),
-        "regions": db.region_payload(limit=8, danger_order=True),
-        "armies": db.army_payload(limit=8, danger_order=True),
+        "regions_hot": db.region_report(limit=4),
+        "armies_hot": db.army_report(limit=4),
+        "region_count": region_count,
+        "army_count": army_count,
         "fixed_flows": fixed_flows or [],
         "deaths_this_turn": deaths_this_turn or [],
+        "data_note": (
+            "以上仅本月大概盘面。地区/军队/派系/阶级/外部势力的具体数值，"
+            "写到细节时调工具查实时数据：view_state、list_regions/inspect_region、"
+            "list_armies/inspect_army、list_external_powers、list_issues/inspect_issue、check_treasury。"
+        ),
     }
     raw = run_agent_stream_text(
         agent,
         json.dumps(payload, ensure_ascii=False, sort_keys=False),
         tag="simulator",
+        on_thinking=on_thinking,
+        on_text=on_text,
     )
     return raw.strip()
 
@@ -118,9 +133,11 @@ def extract_scores_with_agno(
         "candidate_events": candidate_events,
         "current_state": dict(state.metrics),
         "factions": db.faction_report(),
+        "classes": db.class_report(),
         "external_powers": db.external_power_payload(),
         "region_ids": region_ids,
         "army_ids": army_ids,
+        "class_names": [r["name"] for r in db.conn.execute("SELECT DISTINCT name FROM classes ORDER BY name").fetchall()],
         "external_power_ids": [str(r["id"]) for r in db.conn.execute("SELECT id FROM external_powers").fetchall()],
         "fiscal_config": db.get_fiscal_config(),
     }

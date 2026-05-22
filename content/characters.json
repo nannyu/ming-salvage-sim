@@ -23,6 +23,24 @@
       "satisfaction": 54,
       "leverage": 66,
       "agenda": "清议名分、裁抑阉党、以制度约束权力"
+    },
+    {
+      "name": "宗室",
+      "satisfaction": 45,
+      "leverage": 40,
+      "agenda": "保宗禄、护藩国田产、拒削藩与清核"
+    },
+    {
+      "name": "中立",
+      "satisfaction": 50,
+      "leverage": 45,
+      "agenda": "部院实务、避党争、按章办事"
+    },
+    {
+      "name": "西学",
+      "satisfaction": 38,
+      "leverage": 25,
+      "agenda": "引西法历算、造火器、办水利、修《崇祯历书》"
     }
   ],
   "characters": [

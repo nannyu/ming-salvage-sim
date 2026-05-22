@@ -27,7 +27,9 @@ class GameDB:
         # 静态设定来源。过渡期 content 可省略，省略时自行加载；
         # 步骤7 起由 GameSession 统一传入同一份 GameContent。
         self.content = content if content is not None else GameContent.load()
-        self.conn = sqlite3.connect(path)
+        # check_same_thread=False：流式颁诏在 worker 线程跑 resolve_turn，
+        # 复用同一 GameDB 连接。游戏单写者、无并发写，跨线程安全。
+        self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.init_schema()
 
@@ -383,6 +385,20 @@ class GameDB:
 
             CREATE INDEX IF NOT EXISTS idx_issue_advances_issue
             ON issue_advances(issue_id, turn);
+
+            CREATE TABLE IF NOT EXISTS classes (
+                name TEXT NOT NULL,
+                region_id TEXT NOT NULL DEFAULT '',
+                population INTEGER NOT NULL,
+                satisfaction INTEGER NOT NULL,
+                leverage INTEGER NOT NULL,
+                agenda TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (name, region_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_classes_region
+            ON classes(region_id, name);
             """
         )
         for column, definition in {
@@ -529,6 +545,14 @@ class GameDB:
                 VALUES (?, ?, ?, ?)
                 """,
                 (faction.name, faction.satisfaction, faction.leverage, faction.agenda),
+            )
+        for cls in self.content.classes.values():
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO classes (name, region_id, population, satisfaction, leverage, agenda)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (cls.name, cls.region_id, cls.population, cls.satisfaction, cls.leverage, cls.agenda),
             )
         for power in self.content.external_powers.values():
             self.conn.execute(
@@ -699,7 +723,9 @@ class GameDB:
             turn_phase=str(row["turn_phase"] or "summoning"),
         )
         if metrics:
-            state.metrics.update(metrics)
+            # 只接当前 GameState 默认 dict 里有的 key，避免旧 DB 残留废弃 metric 灌入。
+            valid_keys = set(state.metrics.keys())
+            state.metrics.update({k: v for k, v in metrics.items() if k in valid_keys})
         account_rows = self.conn.execute("SELECT account, balance FROM economy_accounts").fetchall()
         for account in account_rows:
             account_name = str(account["account"])
@@ -977,6 +1003,68 @@ class GameDB:
             f"{row['name']}满意{row['satisfaction']}、势力{row['leverage']}，所求：{row['agenda']}"
             for row in rows
         )
+
+    def class_rows(self, region_id: str = "") -> List[sqlite3.Row]:
+        """region_id="" 取全国汇总行；其它取该省切片。"""
+        return self.conn.execute(
+            "SELECT name, region_id, population, satisfaction, leverage, agenda "
+            "FROM classes WHERE region_id = ? ORDER BY name",
+            (region_id,),
+        ).fetchall()
+
+    def class_report(self) -> str:
+        """全国汇总 + 各省紧张切片（sat<=30 且 lev>=60）。"""
+        national = self.class_rows("")
+        if not national:
+            return "阶级未建档。"
+        head = "；".join(
+            f"{row['name']}满意{row['satisfaction']}、势力{row['leverage']}（{row['agenda']}）"
+            for row in national
+        )
+        hot = self.conn.execute(
+            """
+            SELECT c.name, c.region_id, c.satisfaction, c.leverage, r.name AS region_name
+            FROM classes c
+            LEFT JOIN regions r ON r.id = c.region_id
+            WHERE c.region_id <> '' AND c.satisfaction <= 30 AND c.leverage >= 60
+            ORDER BY c.satisfaction ASC, c.leverage DESC
+            """
+        ).fetchall()
+        if not hot:
+            return f"阶级总览：{head}。各省阶级暂无高压预警。"
+        warn = "；".join(
+            f"{row['region_name'] or row['region_id']} {row['name']}满意{row['satisfaction']}/势力{row['leverage']}"
+            for row in hot
+        )
+        return f"阶级总览：{head}。高压预警：{warn}。"
+
+    def adjust_classes(self, deltas: Dict[str, Dict[str, int]]) -> None:
+        """deltas 结构：{ key: {satisfaction: +/-N, leverage: +/-N} }
+        key 形式：'农民' (全国) 或 '农民@shaanxi' (省级)。
+        """
+        for key, fields in deltas.items():
+            if not fields:
+                continue
+            if "@" in key:
+                name, region_id = key.split("@", 1)
+            else:
+                name, region_id = key, ""
+            row = self.conn.execute(
+                "SELECT satisfaction, leverage FROM classes WHERE name = ? AND region_id = ?",
+                (name.strip(), region_id.strip()),
+            ).fetchone()
+            if not row:
+                continue
+            sat = int(row["satisfaction"]) + int(fields.get("satisfaction", 0) or 0)
+            lev = int(row["leverage"]) + int(fields.get("leverage", 0) or 0)
+            sat = max(0, min(100, sat))
+            lev = max(0, min(100, lev))
+            self.conn.execute(
+                "UPDATE classes SET satisfaction = ?, leverage = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE name = ? AND region_id = ?",
+                (sat, lev, name.strip(), region_id.strip()),
+            )
+        self.conn.commit()
 
     def external_power_rows(self) -> List[sqlite3.Row]:
         return self.conn.execute(

@@ -73,6 +73,20 @@ class Faction:
 
 
 @dataclass
+class SocialClass:
+    """阶级人口：朝堂外的社会基本盘。
+    region_id="" 表示全国汇总；非空表示该省切片（key 与 regions.id 对应）。
+    机制：lev 高 + sat 低 → 易触发该省/该阶级骚乱事件，由 LLM 在推演中判定。
+    """
+    name: str            # 农民/士绅/官僚/军户/商人/匠户/宗藩
+    region_id: str       # "" = 全国汇总；否则匹配 regions.id
+    population: int      # 万人（粗估，全国汇总=各省合计的参考值）
+    satisfaction: int    # 0-100
+    leverage: int        # 0-100
+    agenda: str          # 一句话诉求
+
+
+@dataclass
 class Region:
     id: str
     name: str
@@ -140,11 +154,6 @@ class GameState:
             "内库": 440,
             "民心": 46,
             "皇威": 58,
-            "边防": 68,
-            "民变": 30,
-            "党争": 64,
-            "执行": 42,
-            "瞒报": 50,
         }
     )
     log: List[str] = field(default_factory=list)
