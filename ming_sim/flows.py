@@ -2,11 +2,120 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import json
+from typing import Dict, List, Optional, Tuple
 
 from ming_sim.constants import TURN_UNIT
 from ming_sim.db import GameDB
 from ming_sim.models import GameState, monthly_amount
+
+
+# ── 省级财政计算 ──────────────────────────────────────────────────────────────
+
+# 皇庄增量租率：没收藩王庄田转皇庄后，每万亩每月增加内库收入（万两）
+# 基准皇庄收入走 fiscal_config.皇庄_base；此常数只用于增量计算
+_HUANG_TIAN_RENT_PER_WAN_MU = 0.57  # ≈ 20万两/月 ÷ 35万亩
+
+
+def _province_transport_ratio(fiscal: dict, unrest: int) -> float:
+    """解运比（保留函数签名，返回1.0；实际损耗已并入 _province_efficiency）。"""
+    return 1.0
+
+
+def _province_collection_rate(gentry_resistance: int, unrest: int) -> float:
+    """实收率（保留函数签名，返回1.0；实际损耗已并入 _province_efficiency）。"""
+    return 1.0
+
+
+def _province_efficiency(fiscal: dict, gentry_resistance: int, unrest: int) -> float:
+    """综合到账率：士绅阻力 + 腐败度 + 民变三因子决定税银实际到账比例。
+    上限 1.0（现代化/彻底改革后可接近满额），下限 0.05（完全失控）。
+    开局典型值：富省~0.25，贫乱省~0.15。
+    改革路径：清查士绅→gentry↓，整治贪腐→corruption↓，赈灾→unrest↓，效率可升至0.60+。
+    """
+    corruption = fiscal.get("corruption", 50)
+    rate = (1.0
+            - gentry_resistance / 100 * 0.55
+            - corruption        / 100 * 0.45
+            - max(0, unrest - 20) / 100 * 0.30)
+    return max(0.05, min(1.00, rate))
+
+
+def calc_province_fiscal(
+    state: GameState,
+    db: GameDB,
+) -> Tuple[int, int, List[Dict]]:
+    """按省计算月度财政收入。
+
+    tax_per_turn 是省级校准月税基准（含田赋+辽饷+盐税+商税合计）。
+    fiscal JSON 里的税种细分用于拆比例；动态系数（tr/cr）乘在总量上。
+    皇庄地租单独走内库，基准来自 fiscal.huang_tian × 租率。
+
+    返回 (国库月收合计, 内库月收合计, 明细列表)。
+    """
+    rows = db.conn.execute(
+        "SELECT id, name, unrest, gentry_resistance, tax_per_turn, fiscal FROM regions"
+    ).fetchall()
+    if not rows:
+        raise SystemExit("calc_province_fiscal: regions 表无数据，中止。")
+
+    wei = state.metrics.get("皇威", 58)
+
+    guo_ku_total = 0
+    nei_ku_total = 0
+    details: List[Dict] = []
+
+    for row in rows:
+        region_id    = str(row["id"])
+        name         = str(row["name"])
+        unrest       = int(row["unrest"])
+        gentry       = int(row["gentry_resistance"])
+        tax_base     = int(row["tax_per_turn"])   # 省级月税基准（万两）
+        fiscal: dict = json.loads(row["fiscal"] or "{}")
+
+        huang_tian   = fiscal.get("huang_tian", 0)
+        liao_xiang   = fiscal.get("liao_xiang", 0)
+        salt_tax     = fiscal.get("salt_tax", 0)
+        commerce_tax = fiscal.get("commerce_tax", 0)
+
+        # 综合到账率（单一系数，上限1.0，改革后可接近满额）
+        eff = _province_efficiency(fiscal, gentry, unrest)
+
+        # 辽饷受皇威额外折扣（皇威低→地方截留多）
+        liao_eff = eff * (0.5 + wei / 200)
+        liao_eff = max(0.10, min(1.00, liao_eff))
+
+        # 全部税种统一乘综合到账率
+        liao     = round(liao_xiang   * liao_eff)
+        salt     = round(salt_tax     * eff)
+        commerce = round(commerce_tax * eff)
+        tian_fu_base = max(0, tax_base - liao_xiang - salt_tax - commerce_tax)
+        tian_fu  = round(tian_fu_base * eff)
+
+        # 皇庄 → 内库
+        # 基准由 fiscal_config.皇庄_base 统一覆盖（已校准）；
+        # huang_tian 字段用于记录没收藩王庄田后的增量：
+        #   增量月收 = 新增万亩 × _HUANG_TIAN_RENT_PER_WAN_MU
+        # 只有北直隶有 huang_tian > 0，增量=0（开局无新增），后续没收时才>基准
+        huang_income = 0  # 开局皇庄收入走 fiscal_config，此处不重复计算
+
+        province_guo = tian_fu + liao + salt + commerce
+        guo_ku_total += province_guo
+        nei_ku_total += huang_income
+
+        details.append({
+            "region_id":       region_id,
+            "name":            name,
+            "田赋":            tian_fu,
+            "辽饷":            liao,
+            "盐税":            salt,
+            "商税":            commerce,
+            "皇庄":            huang_income,
+            "province_total":  province_guo,
+            "efficiency":      round(eff, 3),
+        })
+
+    return guo_ku_total, nei_ku_total, details
 
 ISSUE_METRIC_KEYS = {"民心", "皇威"}
 ISSUE_METRIC_LOCK_CAPS = {
@@ -82,21 +191,16 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
         flows.append({"dir": "expense", "account": account, "amount": abs(actual),
                       "category": category, "reason": reason})
 
-    # ── 国库收入 ──────────────────────────────────────────────────────────────
-    land_base = db.conn.execute("SELECT SUM(tax_per_turn) FROM regions").fetchone()[0]
-    if land_base is None:
-        raise SystemExit("fiscal_tick: regions 表无数据，中止。")
-    _income("国库", monthly_amount(round(int(land_base) * cfg["田赋_rate"] / 100)), "田赋", f"两京十三省田赋{TURN_UNIT}实收")
-    _income("国库", monthly_amount(round(cfg["辽饷_base"] * cfg["辽饷_rate"] / 100)), "辽饷", f"辽东专项加派{TURN_UNIT}实收")
-    _income("国库", monthly_amount(round(cfg["盐税_base"] * cfg["盐税_rate"] / 100)), "盐税", f"两淮两浙盐引{TURN_UNIT}定额")
-    _income("国库", monthly_amount(round(cfg["商税_base"] * cfg["商税_rate"] / 100)), "商税", f"各地关卡店税{TURN_UNIT}汇总")
+    # ── 国库/内库收入（省级动态计算）─────────────────────────────────────────
+    guo_income, nei_income, _province_details = calc_province_fiscal(state, db)
+    _income("国库", guo_income, "田赋辽饷盐商", f"两京十三省{TURN_UNIT}综合税收实入")
+    _income("内库", nei_income, "皇庄",         f"北直隶皇庄{TURN_UNIT}地租")
 
     # ── 国库支出（非军饷）────────────────────────────────────────────────────
     _expense("国库", monthly_amount(round(cfg["宗室禄米_base"] * cfg["宗室禄米_rate"] / 100)), "宗室禄米", f"诸藩宗室{TURN_UNIT}禄米")
     _expense("国库", monthly_amount(round(cfg["官俸_base"]     * cfg["官俸_rate"]     / 100)), "百官俸禄", f"在京百官{TURN_UNIT}俸禄")
     _expense("国库", monthly_amount(round(cfg["工程_base"]     * cfg["工程_rate"]     / 100)), "工部",     f"工部{TURN_UNIT}维护支出")
     _expense("国库", monthly_amount(round(cfg["赈灾_base"]     * cfg["赈灾_rate"]     / 100)), "赈灾备用", f"制度性{TURN_UNIT}赈灾预留")
-    _expense("国库", monthly_amount(round(cfg["九边补给_base"]  * cfg["九边补给_rate"] / 100)), "九边补给", f"九边{TURN_UNIT}粮草补给")
 
     # ── 内库收入 ──────────────────────────────────────────────────────────────
     _income("内库", monthly_amount(round(cfg["皇庄_base"]  * cfg["皇庄_rate"]  / 100)), "皇庄",   f"皇庄地租{TURN_UNIT}上缴")
@@ -121,7 +225,7 @@ def apply_fixed_period_flows(db: GameDB, state: GameState) -> List[Dict[str, obj
     for row in ordered:
         army_id = str(row["id"])
         name = str(row["name"])
-        needed = monthly_amount(int(row["maintenance_per_turn"]))
+        needed = int(row["maintenance_per_turn"])
         if needed <= 0:
             continue
         available = max(0, int(state.metrics["国库"]))

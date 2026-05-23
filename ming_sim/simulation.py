@@ -70,7 +70,8 @@ def simulate_season_with_agno(
         dict(r) for r in db.conn.execute(
             "SELECT name,kind,population,public_support,unrest,natural_disaster,"
             "human_disaster,registered_land,hidden_land,tax_per_turn,grain_security,"
-            "gentry_resistance,military_pressure,status FROM regions ORDER BY id"
+            "gentry_resistance,military_pressure,status,"
+            "json_extract(fiscal,'$.corruption') as corruption FROM regions ORDER BY id"
         ).fetchall()
     ]
     army_rows = [
@@ -146,7 +147,8 @@ def extract_scores_with_agno(
         dict(r) for r in db.conn.execute(
             "SELECT id,name,kind,population,public_support,unrest,natural_disaster,"
             "human_disaster,registered_land,hidden_land,tax_per_turn,grain_security,"
-            "gentry_resistance,military_pressure,status FROM regions ORDER BY id"
+            "gentry_resistance,military_pressure,status,"
+            "json_extract(fiscal,'$.corruption') as corruption FROM regions ORDER BY id"
         ).fetchall()
     ]
     army_rows = [

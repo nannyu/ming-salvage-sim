@@ -760,7 +760,7 @@ def apply_score_extraction(
         if content is not None and name not in content.characters:
             applied_status_changes.append({
                 "name": name, "status": status, "rejected": True,
-                "reason": "非既有大臣（新任走 appointments）",
+                "reason": "非既有大臣或妃嫔（新任走 appointments）",
             })
             continue
         cur_status, _ = db.get_character_status(name)

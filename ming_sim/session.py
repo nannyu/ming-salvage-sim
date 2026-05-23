@@ -74,6 +74,28 @@ class TurnSnapshot:
     previous_summary: str = ""
 
 
+def _find_candidate_by_name(content: GameContent, name: str) -> Optional[str]:
+    """后宫 candidate 升格时，extractor 输出的称呼（如'李氏雪凝'）可能与原名（'李雪凝'）
+    不完全一致。在 content.characters 里找：精确匹配 → aliases 含 name → name 含原名/原名含 name。
+    返回 content.characters 里的原始 key，找不到返回 None。
+    只对 office_type='后宫' 且 status='candidate' 的人物做匹配。"""
+    # 精确匹配
+    if name in content.characters:
+        c = content.characters[name]
+        if c.office_type == "后宫" and c.status == "candidate":
+            return name
+    # aliases 匹配 & 子串匹配
+    for key, c in content.characters.items():
+        if c.office_type != "后宫" or c.status != "candidate":
+            continue
+        if name in (c.aliases or []):
+            return key
+        # 子串匹配（直接）
+        if key in name or name in key:
+            return key
+    return None
+
+
 def apply_appointment(
     db: GameDB,
     state: GameState,
@@ -84,7 +106,14 @@ def apply_appointment(
     """诏书任命/吏部铨选共用落地：建档入库 + 注册 Agent，本回合即可召见。
     LLM（吏部 propose_appointment 或档房 appointments 三道闸）已判过史实合理性；
     代码端只做姓名查重与字段兜底，不做历史校验。返回新任者姓名；
-    payload 不合法、重名、approved=false 则返回空串。"""
+    payload 不合法、重名、approved=false 则返回空串。
+
+    后宫纳妃：data 含 office_type="后宫" 时走后宫路径——office 记称号（贵妃/嫔/才人等），
+    faction 留空（填"后宫"），注册 Agent 以 consort_agent_prompt 为底。
+
+    candidate 升格：若 name 能匹配现有 candidate（含 aliases/子串），
+    走 UPDATE（保留原 style/skills/portrait_id），不新建记录。
+    """
     if not data:
         return ""
     if "approved" in data and not bool(data.get("approved")):
@@ -93,19 +122,72 @@ def apply_appointment(
     office = str(data.get("office") or "").strip()
     if not name or not office:
         return ""
+    is_consort = str(data.get("office_type") or "").strip() == "后宫"
+
+    # ── 后宫 candidate 升格路径 ──────────────────────────────────────
+    if is_consort:
+        original_key = _find_candidate_by_name(content, name)
+        if original_key is not None:
+            # 升格：UPDATE DB 里的记录，保留原 style/skills/portrait_id
+            character = content.characters[original_key]
+            character.office = office
+            character.faction = "后宫"
+            character.status = "active"
+            # 若还没有 portrait_id，补分配
+            if not character.portrait_id:
+                character.portrait_id = db.next_pool_portrait_id("consort_pool_")
+            db.conn.execute(
+                """UPDATE characters SET office=?, office_type='后宫', faction='后宫',
+                   status='active', status_reason='诏书册封', status_changed_turn=?,
+                   portrait_id=CASE WHEN portrait_id='' THEN ? ELSE portrait_id END
+                   WHERE name=?""",
+                (office, state.turn, character.portrait_id, original_key),
+            )
+            db.conn.execute(
+                """INSERT INTO character_offices (character_name, office_title, office_type, source)
+                   VALUES (?, ?, '后宫', '诏书册封')
+                   ON CONFLICT(character_name) DO UPDATE SET
+                       office_title=excluded.office_title,
+                       office_type=excluded.office_type,
+                       source=excluded.source,
+                       updated_at=CURRENT_TIMESTAMP""",
+                (original_key, office),
+            )
+            db.conn.commit()
+            # 若 extractor 用了新称呼，在 content 里建别名指向原对象
+            if name != original_key:
+                content.characters[name] = character
+            if registry is not None:
+                registry.register(character)
+            return original_key  # 返回原始 key，保持一致
+
+    # ── 普通路径：精确名已在册则跳过 ────────────────────────────────
     if name in content.characters:
-        return ""  # 已在册（含 offstage）——不重复建档
-    faction = str(data.get("faction") or "中立").strip()
-    if faction not in content.factions:
+        c = content.characters[name]
+        if c.status != "candidate":
+            return ""  # 已在册非 candidate——不重复建档
+    faction = "后宫" if is_consort else str(data.get("faction") or "中立").strip()
+    if not is_consort and faction not in content.factions:
         faction = "中立"
     character = Character(
-        name=name, office=office, office_type="待铨", faction=faction,
-        aliases=[], personal_skills=[],
-        loyalty=55, ability=60, integrity=55, courage=55,
-        style="新任未详", status="active",
+        name=name,
+        office=office,
+        office_type="后宫" if is_consort else "待铨",
+        faction=faction,
+        aliases=[],
+        personal_skills=[],
+        loyalty=60, ability=55, integrity=60, courage=50,
+        style="新入宫闱" if is_consort else "新任未详",
+        status="active",
     )
     content.characters[name] = character
     db.add_character(state, character)
+    # add_character 已写入并分配 portrait_id，回写到内存对象
+    row = db.conn.execute(
+        "SELECT portrait_id FROM characters WHERE name=?", (name,)
+    ).fetchone()
+    if row:
+        character.portrait_id = str(row["portrait_id"])
     if registry is not None:
         registry.register(character)
     return name

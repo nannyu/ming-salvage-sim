@@ -40,10 +40,12 @@ def _print_header(session: GameSession) -> None:
 def choose_minister(session: GameSession) -> Optional[Character]:
     """列大臣，皇帝选一位。返回 None 表示退朝去审阅诏书。"""
     characters = session.content.characters
-    # offstage（历史尚未登场）不进朝臣名单——到 debut 年月由月初 tick 自动转 active 后才现身。
+    # offstage（历史尚未登场）不进名单——到 debut 年月由月初 tick 转 active 才现身。
+    # candidate（待选采女池）也不进名单——须经选妃诏书册封升 active 后方可召见。
     names = [
         name for name in characters
-        if session.db.get_character_status(name)[0] != "offstage"
+        if session.db.get_character_status(name)[0] not in ("offstage", "candidate")
+        and getattr(characters[name], "status", "active") != "candidate"
     ]
     print("\n可召见大臣：")
     for idx, name in enumerate(names, 1):

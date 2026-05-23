@@ -28,7 +28,8 @@
     "audit_tax_arrears": {"name": "清查积欠", "kind": "个人", "character": "毕自严", "tools": true},
     "front_line_plan": {"name": "前线部署", "kind": "个人", "character": "袁崇焕", "tools": true},
     "strategic_review": {"name": "战略复核", "kind": "个人", "character": "孙承宗", "tools": true},
-    "factory_network_probe": {"name": "厂卫旧线", "kind": "个人", "character": "魏忠贤", "tools": true}
+    "factory_network_probe": {"name": "厂卫旧线", "kind": "个人", "character": "魏忠贤", "tools": true},
+    "cultivate_consort": {"name": "调教妃嫔", "kind": "官职", "office": "后宫", "tools": true}
   },
   "skill_descriptions": {
     "view_state": "看核心国势、钱粮与派系态势。",
@@ -58,7 +59,8 @@
     "audit_tax_arrears": "毕自严专长：清查积欠、实收实支、追缴亏空。",
     "front_line_plan": "袁崇焕专长：宁锦守势、军心、前线部署。",
     "strategic_review": "孙承宗专长：辽东大局复核、名分和将领评估。",
-    "factory_network_probe": "魏忠贤专长：厂卫旧线、把柄、威慑与截留风险。"
+    "factory_network_probe": "魏忠贤专长：厂卫旧线、把柄、威慑与截留风险。",
+    "cultivate_consort": "皇帝调教妃嫔：为其新增技能或改变性格，效果永久生效。"
   },
   "office_skills": {
     "内阁": ["廷议", "票拟", "拟旨", "协调六部"],
@@ -68,7 +70,8 @@
     "司礼监": ["传旨", "内廷查访", "内库建议", "宫中密奏"],
     "锦衣卫": ["密查", "缉访", "审讯", "监视官员"],
     "东厂": ["密查", "缉访", "内廷旧线", "威慑外朝"],
-    "边镇": ["查本镇军情", "练兵建议", "守城部署", "前线回奏"]
+    "边镇": ["查本镇军情", "练兵建议", "守城部署", "前线回奏"],
+    "后宫": ["调教", "倾诉", "枕边风", "代抄经文"]
   },
   "office_default_skills": {
     "内阁": ["convene_court_debate", "coordinate_ministries"],
@@ -78,7 +81,8 @@
     "司礼监": ["inner_court_inquiry", "transmit_edict"],
     "锦衣卫": ["secret_investigation"],
     "东厂": ["secret_investigation", "intimidate_obstruction"],
-    "边镇": ["check_military", "mobilize_troops"]
+    "边镇": ["check_military", "mobilize_troops"],
+    "后宫": ["cultivate_consort"]
   },
   "personal_skill_ids": {
     "毕自严": ["audit_tax_arrears"],

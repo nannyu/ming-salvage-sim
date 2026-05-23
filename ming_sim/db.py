@@ -18,7 +18,7 @@ from ming_sim.constants import (
     BUILDING_QUANTITY_FIELDS, BUILDING_SCORE_FIELDS, BUILDING_TEXT_FIELDS,
     ECONOMY_ACCOUNTS, EXTERNAL_POWER_FIELD_LABELS, EXTERNAL_POWER_SCORE_FIELDS,
     EXTERNAL_POWER_TEXT_FIELDS, MONEY_UNIT, REGION_FIELD_LABELS, REGION_QUANTITY_FIELDS,
-    REGION_SCORE_FIELDS, REGION_TEXT_FIELDS, TURN_UNIT,
+    FISCAL_SCORE_FIELDS, REGION_SCORE_FIELDS, REGION_TEXT_FIELDS, TURN_UNIT,
 )
 from ming_sim.content import GameContent
 from ming_sim.matching import match_army_id_from_text, match_region_id_from_text
@@ -147,6 +147,7 @@ class GameDB:
                 gentry_resistance INTEGER NOT NULL,
                 military_pressure INTEGER NOT NULL,
                 status TEXT NOT NULL,
+                fiscal TEXT NOT NULL DEFAULT '{}',
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
 
@@ -462,8 +463,19 @@ class GameDB:
         self.ensure_column("characters", "status", "TEXT NOT NULL DEFAULT 'active'")
         self.ensure_column("characters", "status_reason", "TEXT NOT NULL DEFAULT ''")
         self.ensure_column("characters", "status_changed_turn", "INTEGER NOT NULL DEFAULT 0")
+        self.ensure_column("characters", "portrait_id", "TEXT NOT NULL DEFAULT ''")
         # 步骤7：回合阶段（旧库迁移，schema 升级非 fallback）
         self.ensure_column("game_state", "turn_phase", "TEXT NOT NULL DEFAULT 'summoning'")
+        # 后宫调教记录
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS consort_traits (
+                name TEXT PRIMARY KEY,
+                extra_skills TEXT NOT NULL DEFAULT '',
+                extra_traits TEXT NOT NULL DEFAULT '',
+                updated_turn INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         self.conn.commit()
         self.init_fiscal_config()
 
@@ -479,16 +491,14 @@ class GameDB:
             ("盐税_rate",   100,  "rate", "盐税实收率%"),
             ("商税_base",    22,  "base", "各地关卡店税季额，万两。加钞关/抽分可拉到 60"),
             ("商税_rate",   100,  "rate", "商税实收率%"),
-            ("宗室禄米_base",100,  "base", "诸藩宗室禄米季度账面额，万两"),
-            ("宗室禄米_rate", 70,  "rate", "宗室禄米实发率%。砍宗室可降到 30~50"),
-            ("官俸_base",    35,  "base", "在京百官俸禄季额，万两"),
+            ("宗室禄米_base",360,  "base", "诸藩宗室禄米季度账面额，万两。史实万历末已达千万/年；削藩可降到180"),
+            ("宗室禄米_rate", 55,  "rate", "宗室禄米实发率%。史实崇祯初实发不足6成；削藩可降到30~40"),
+            ("官俸_base",    75,  "base", "在京百官俸禄季额，万两（含地方折色）"),
             ("官俸_rate",   100,  "rate", "官俸发放率%"),
             ("工程_base",    15,  "base", "工部季度维护支出，万两"),
             ("工程_rate",   100,  "rate", "工程维护率%"),
             ("赈灾_base",    15,  "base", "制度性赈灾备用，万两"),
             ("赈灾_rate",   100,  "rate", "赈灾拨付率%"),
-            ("九边补给_base",110,  "base", "九边粮草季度补给（非军饷），万两"),
-            ("九边补给_rate", 90,  "rate", "九边补给执行率%"),
             ("皇庄_base",    60,  "base", "皇庄地租季度上缴内库，万两"),
             ("皇庄_rate",   100,  "rate", "皇庄收益率%"),
             ("织造_base",    35,  "base", "苏杭织造局季度上缴内库，万两"),
@@ -504,7 +514,7 @@ class GameDB:
         ]
         # schema 版本：旧 DB 用 INSERT OR IGNORE 保留玩家中途的 set_fiscal_config 改动；
         # 默认值整体重平衡时升 SCHEMA_VERSION，旧库走 UPDATE 路径全量覆盖。
-        SCHEMA_VERSION = 2
+        SCHEMA_VERSION = 5
         cur_ver_row = self.conn.execute(
             "SELECT value FROM fiscal_config WHERE key = '__schema_version'"
         ).fetchone()
@@ -661,11 +671,12 @@ class GameDB:
                 INSERT INTO regions
                 (id, name, kind, population, public_support, unrest, natural_disaster, human_disaster,
                  registered_land, hidden_land, tax_per_turn, grain_security, gentry_resistance,
-                 military_pressure, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 military_pressure, status, fiscal)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     kind = excluded.kind,
+                    fiscal = excluded.fiscal,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -684,6 +695,7 @@ class GameDB:
                     region.gentry_resistance,
                     region.military_pressure,
                     region.status,
+                    json.dumps(region.fiscal, ensure_ascii=False),
                 ),
             )
         for army in self.content.armies.values():
@@ -920,7 +932,8 @@ class GameDB:
         status: str,
         reason: str = "",
     ) -> None:
-        """改人物状态：active/offstage/dismissed/imprisoned/exiled/retired/dead。"""
+        """改人物状态：active/offstage/dismissed/imprisoned/exiled/retired/dead。
+        大臣走 characters 表；后宫（consorts）走内存对象 + consort_traits 备档。"""
         valid = {"active", "offstage", "dismissed", "imprisoned", "exiled", "retired", "dead"}
         if status not in valid:
             raise ValueError(f"character status 非法：{status}")
@@ -994,6 +1007,60 @@ class GameDB:
             })
         return debuted
 
+    # ── 后宫调教 ──────────────────────────────────────────────────────────
+
+    def get_consort_traits(self, name: str) -> dict:
+        """返回 {extra_skills: [...], extra_traits: [...]}，不存在时返回空。"""
+        row = self.conn.execute(
+            "SELECT extra_skills, extra_traits FROM consort_traits WHERE name=?", (name,)
+        ).fetchone()
+        if not row:
+            return {"extra_skills": [], "extra_traits": []}
+        skills = [s.strip() for s in row["extra_skills"].split("，") if s.strip()]
+        traits = [t.strip() for t in row["extra_traits"].split("，") if t.strip()]
+        return {"extra_skills": skills, "extra_traits": traits}
+
+    def cultivate_consort(self, name: str, turn: int, skill: str = "", trait: str = "") -> dict:
+        """追加技能或性格词，去重后持久化。返回最新值。"""
+        current = self.get_consort_traits(name)
+        skills = current["extra_skills"]
+        traits = current["extra_traits"]
+        if skill and skill not in skills:
+            skills.append(skill)
+        if trait and trait not in traits:
+            traits.append(trait)
+        self.conn.execute(
+            """INSERT INTO consort_traits(name, extra_skills, extra_traits, updated_turn)
+               VALUES(?,?,?,?)
+               ON CONFLICT(name) DO UPDATE SET
+                 extra_skills=excluded.extra_skills,
+                 extra_traits=excluded.extra_traits,
+                 updated_turn=excluded.updated_turn,
+                 updated_at=CURRENT_TIMESTAMP""",
+            (name, "，".join(skills), "，".join(traits), turn),
+        )
+        self.conn.commit()
+        return {"extra_skills": skills, "extra_traits": traits}
+
+    def next_pool_portrait_id(self, prefix: str = "minister_pool_") -> str:
+        """分配下一个预设头像 ID（顺序递增，不循环）。
+        minister_pool: 60 个槽；consort_pool: 20 个槽。
+        超出上限后继续递增（前端 onError fallback 到占位符）。"""
+        rows = self.conn.execute(
+            "SELECT portrait_id FROM characters WHERE portrait_id LIKE ?",
+            (prefix + "%",),
+        ).fetchall()
+        used = set()
+        for r in rows:
+            try:
+                used.add(int(r["portrait_id"].replace(prefix, "")))
+            except ValueError:
+                pass
+        n = 1
+        while n in used:
+            n += 1
+        return f"{prefix}{n}"
+
     def add_character(self, state: GameState, character: "Character") -> None:
         """运行时新建人物（吏部任命/皇帝点名）。已存在同名则不动，避免覆盖既有状态。"""
         existing = self.conn.execute(
@@ -1001,13 +1068,18 @@ class GameDB:
         ).fetchone()
         if existing is not None:
             return
+        # 若没有专属 portrait_id，按 office_type 分配预设池头像
+        portrait_id = character.portrait_id
+        if not portrait_id:
+            prefix = "consort_pool_" if character.office_type == "后宫" else "minister_pool_"
+            portrait_id = self.next_pool_portrait_id(prefix)
         self.conn.execute(
             """
             INSERT INTO characters
             (name, office, office_type, faction, personal_skills, loyalty, ability, integrity, courage, style,
              birth_year, historical_death_year, historical_death_month, debut_year, debut_month,
-             status, status_reason, status_changed_turn)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             status, status_reason, status_changed_turn, portrait_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 character.name,
@@ -1026,8 +1098,9 @@ class GameDB:
                 character.debut_year,
                 character.debut_month,
                 character.status,
-                "吏部铨选任命",
+                "吏部铨选任命" if character.office_type != "后宫" else "诏书纳妃",
                 state.turn,
+                portrait_id,
             ),
         )
         self.conn.execute(
@@ -1096,7 +1169,6 @@ class GameDB:
             + round(cfg.get("官俸_base", 35) * cfg.get("官俸_rate", 100) / 100)
             + round(cfg.get("工程_base", 15) * cfg.get("工程_rate", 100) / 100)
             + round(cfg.get("赈灾_base", 15) * cfg.get("赈灾_rate", 100) / 100)
-            + round(cfg.get("九边补给_base", 110) * cfg.get("九边补给_rate", 90) / 100)
         )
         nk_in = (
             round(cfg.get("皇庄_base", 60) * cfg.get("皇庄_rate", 100) / 100)
@@ -1523,13 +1595,47 @@ class GameDB:
             for field, value in raw_changes.items():
                 if field == "reason":
                     continue
-                # 先判字段合法，再取 row[field]：非法字段直接报清楚，
-                # 不让 sqlite3.Row 抛误导性的 "No item with that key"。
-                if field not in REGION_SCORE_FIELDS and field not in REGION_QUANTITY_FIELDS and field not in REGION_TEXT_FIELDS:
+                # 先判字段合法，再取值：非法字段直接报清楚。
+                all_direct = REGION_SCORE_FIELDS + REGION_QUANTITY_FIELDS + REGION_TEXT_FIELDS
+                if field not in all_direct and field not in FISCAL_SCORE_FIELDS:
                     raise LLMContractError(
                         f"{TURN_UNIT}末执行评估引用了非法地区字段：'{field}'（地区 '{region_id}'）。"
-                        f"合法字段：{REGION_SCORE_FIELDS + REGION_QUANTITY_FIELDS + REGION_TEXT_FIELDS}"
+                        f"合法字段：{all_direct + FISCAL_SCORE_FIELDS}"
                     )
+
+                # ── fiscal JSON 子字段（corruption 等）────────────────────────
+                if field in FISCAL_SCORE_FIELDS:
+                    fiscal: dict = json.loads(str(row["fiscal"] or "{}"))
+                    old_value = fiscal.get(field, 50)
+                    delta = int(value)
+                    new_value = max(0, min(100, int(old_value) + delta))
+                    actual_delta = new_value - int(old_value)
+                    if actual_delta == 0:
+                        continue
+                    fiscal[field] = new_value
+                    self.conn.execute(
+                        "UPDATE regions SET fiscal = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                        (json.dumps(fiscal, ensure_ascii=False), region_id),
+                    )
+                    self.conn.execute(
+                        """
+                        INSERT INTO region_logs
+                        (turn, year, period, region_id, field, old_value, new_value, delta, reason, event_id, edict_id, actor)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (state.turn, state.year, state.period, region_id,
+                         field, str(old_value), str(new_value), actual_delta,
+                         reason, event.id, edict_id, actor),
+                    )
+                    changes.append({
+                        "region": row["name"], "field": field,
+                        "label": REGION_FIELD_LABELS.get(field, field),
+                        "old": old_value, "new": new_value,
+                        "delta": actual_delta, "reason": reason,
+                    })
+                    continue
+
+                # ── 直接列字段 ────────────────────────────────────────────────
                 old_value = row[field]
                 if field in REGION_SCORE_FIELDS:
                     delta = int(value)
@@ -1564,29 +1670,17 @@ class GameDB:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        state.turn,
-                        state.year,
-                        state.period,
-                        region_id,
-                        field,
-                        str(old_value),
-                        str(stored_new),
-                        log_delta,
-                        reason,
-                        event.id,
-                        edict_id,
-                        actor,
+                        state.turn, state.year, state.period, region_id,
+                        field, str(old_value), str(stored_new), log_delta,
+                        reason, event.id, edict_id, actor,
                     ),
                 )
                 changes.append(
                     {
-                        "region": row["name"],
-                        "field": field,
+                        "region": row["name"], "field": field,
                         "label": REGION_FIELD_LABELS.get(field, field),
-                        "old": old_value,
-                        "new": stored_new,
-                        "delta": log_delta,
-                        "reason": reason,
+                        "old": old_value, "new": stored_new,
+                        "delta": log_delta, "reason": reason,
                     }
                 )
         self.conn.commit()

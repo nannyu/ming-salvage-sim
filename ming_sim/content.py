@@ -69,6 +69,7 @@ def load_character_content() -> Tuple[Dict[str, Faction], Dict[str, Character]]:
             debut_year=int(item.get("debut_year") or 0),
             debut_month=int(item.get("debut_month") or 0),
             status=str(item.get("status") or "active"),
+            summary=str(item.get("summary") or ""),
         )
 
     if not factions or not characters:
@@ -131,22 +132,27 @@ def load_region_content() -> Dict[str, Region]:
     for idx, raw in enumerate(require_list(data.get("regions"), "regions.json.regions"), 1):
         item = require_dict(raw, f"regions.json.regions[{idx}]")
         region_id = str_field(item, "id", f"regions.json.regions[{idx}]")
+        ctx = f"regions.json.regions[{idx}]"
+        fiscal_raw = item.get("fiscal")
+        if not isinstance(fiscal_raw, dict):
+            raise SystemExit(f"{ctx}.fiscal 必须是 JSON 对象，实际为 {type(fiscal_raw).__name__}。")
         regions[region_id] = Region(
             id=region_id,
-            name=str_field(item, "name", f"regions.json.regions[{idx}]"),
-            kind=str_field(item, "kind", f"regions.json.regions[{idx}]"),
-            population=int_field(item, "population", f"regions.json.regions[{idx}]"),
-            public_support=int_field(item, "public_support", f"regions.json.regions[{idx}]"),
-            unrest=int_field(item, "unrest", f"regions.json.regions[{idx}]"),
-            natural_disaster=str_field(item, "natural_disaster", f"regions.json.regions[{idx}]"),
-            human_disaster=str_field(item, "human_disaster", f"regions.json.regions[{idx}]"),
-            registered_land=int_field(item, "registered_land", f"regions.json.regions[{idx}]"),
-            hidden_land=int_field(item, "hidden_land", f"regions.json.regions[{idx}]"),
-            tax_per_turn=int_field(item, "tax_per_turn", f"regions.json.regions[{idx}]"),
-            grain_security=int_field(item, "grain_security", f"regions.json.regions[{idx}]"),
-            gentry_resistance=int_field(item, "gentry_resistance", f"regions.json.regions[{idx}]"),
-            military_pressure=int_field(item, "military_pressure", f"regions.json.regions[{idx}]"),
-            status=str_field(item, "status", f"regions.json.regions[{idx}]"),
+            name=str_field(item, "name", ctx),
+            kind=str_field(item, "kind", ctx),
+            population=int_field(item, "population", ctx),
+            public_support=int_field(item, "public_support", ctx),
+            unrest=int_field(item, "unrest", ctx),
+            natural_disaster=str_field(item, "natural_disaster", ctx),
+            human_disaster=str_field(item, "human_disaster", ctx),
+            registered_land=int_field(item, "registered_land", ctx),
+            hidden_land=int_field(item, "hidden_land", ctx),
+            tax_per_turn=int_field(item, "tax_per_turn", ctx),
+            grain_security=int_field(item, "grain_security", ctx),
+            gentry_resistance=int_field(item, "gentry_resistance", ctx),
+            military_pressure=int_field(item, "military_pressure", ctx),
+            status=str_field(item, "status", ctx),
+            fiscal=dict(fiscal_raw),
         )
     if not regions:
         raise SystemExit("regions.json 必须至少定义一个地区。")
@@ -383,6 +389,8 @@ class GameContent:
     # 提示词
     game_world_prompt: str = ""
     minister_agent_prompt: str = ""
+    consort_agent_prompt: str = ""
+
     decree_writer_prompt: str = ""
     season_simulator_prompt: str = ""
     score_extractor_prompt: str = ""
@@ -434,6 +442,7 @@ class GameContent:
             skill_tool_templates=dict_of_strings(load_json_asset("skill_tools.json"), "skill_tools.json"),
             game_world_prompt=load_text_asset("prompts/game_world.md"),
             minister_agent_prompt=load_text_asset("prompts/minister_agent.md"),
+            consort_agent_prompt=load_text_asset("prompts/consort_agent.md"),
             decree_writer_prompt=load_text_asset("prompts/decree_writer.md"),
             season_simulator_prompt=load_text_asset("prompts/season_simulator.md"),
             score_extractor_prompt=load_text_asset("prompts/score_extractor.md"),

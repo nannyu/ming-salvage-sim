@@ -21,6 +21,8 @@ TURN_UNIT = "月"
 REGION_SCORE_FIELDS = ("public_support", "unrest", "grain_security", "gentry_resistance", "military_pressure")
 REGION_QUANTITY_FIELDS = ("population", "registered_land", "hidden_land", "tax_per_turn")
 REGION_TEXT_FIELDS = ("natural_disaster", "human_disaster", "status")
+# fiscal JSON 子字段白名单（0-100量表，存在 regions.fiscal 列里）
+FISCAL_SCORE_FIELDS = ("corruption",)
 ARMY_SCORE_FIELDS = ("supply", "morale", "training", "equipment", "arrears", "mobility", "loyalty")
 ARMY_QUANTITY_FIELDS = ("manpower", "maintenance_per_turn")
 ARMY_TEXT_FIELDS = ("station", "commander", "controller", "troop_type", "status")
@@ -83,6 +85,7 @@ REGION_FIELD_LABELS = {
     "gentry_resistance": "士绅阻力",
     "military_pressure": "军事压力",
     "status": "状态",
+    "corruption": "腐败度",
 }
 ARMY_FIELD_LABELS = {
     "station": "驻扎地",

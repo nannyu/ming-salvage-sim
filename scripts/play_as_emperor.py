@@ -26,6 +26,20 @@ import pexpect
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# 自动加载项目根 .env，让脚本无需手动 source .env 也能读到 API key
+_env_file = ROOT / ".env"
+if _env_file.exists():
+    with _env_file.open(encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if not _line or _line.startswith("#") or "=" not in _line:
+                continue
+            _k, _, _v = _line.partition("=")
+            _k = _k.strip()
+            _v = _v.strip().strip('"').strip("'")
+            if _k:  # .env 强制覆盖 shell 环境，避免旧值干扰
+                os.environ[_k] = _v
+
 from agno.agent import Agent
 from agno.db.sqlite import SqliteDb
 from agno.models.openai import OpenAIChat
@@ -399,20 +413,23 @@ def main() -> None:
     parser.add_argument("--agno-db", default="data/ming_sim_test_agno.db")
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("PLAYTEST_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com"),
-        help="LLM base URL（默认读 PLAYTEST_BASE_URL，回退 OPENAI_BASE_URL）",
+        default=(os.environ.get("PLAYTEST_BASE_URL")
+                 or os.environ.get("OPENAI_BASE_URL", "https://api.deepseek.com")),
+        help="LLM base URL（优先 PLAYTEST_BASE_URL → OPENAI_BASE_URL）",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("PLAYTEST_MODEL") or os.environ.get("OPENAI_MODEL", "deepseek-v4-flash"),
-        help="LLM model（默认读 PLAYTEST_MODEL，回退 OPENAI_MODEL）",
+        default=(os.environ.get("PLAYTEST_MODEL")
+                 or os.environ.get("OPENAI_MODEL", "deepseek-v4-flash")),
+        help="LLM model（优先 PLAYTEST_MODEL → OPENAI_MODEL）",
     )
     parser.add_argument("--timeout", type=int, default=300, help="单步 CLI 超时（秒）")
     args = parser.parse_args()
 
-    api_key = (os.environ.get("PLAYTEST_API_KEY") or os.environ.get("OPENAI_API_KEY", "")).strip()
+    api_key = (os.environ.get("PLAYTEST_API_KEY")
+               or os.environ.get("OPENAI_API_KEY", "")).strip()
     if not api_key:
-        sys.exit("PLAYTEST_API_KEY / OPENAI_API_KEY 均未设置，请先 source .env 或 export。")
+        sys.exit("PLAYTEST_API_KEY / OPENAI_API_KEY 均未设置，请先配置 .env。")
 
     os.makedirs(os.path.dirname(args.log) or ".", exist_ok=True)
     os.makedirs(os.path.dirname(args.db) or ".", exist_ok=True)

@@ -19,13 +19,13 @@ def main() -> None:
                         help="random seed（影响事件抽样）")
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("CLI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        help="OpenAI-compatible base URL（默认读 CLI_BASE_URL，回退 OPENAI_BASE_URL）",
+        default=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        help="OpenAI-compatible base URL（读 OPENAI_BASE_URL）",
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get("CLI_MODEL") or os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-        help="OpenAI-compatible model name（默认读 CLI_MODEL，回退 OPENAI_MODEL）",
+        default=os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
+        help="OpenAI-compatible model name（读 OPENAI_MODEL）",
     )
     parser.add_argument(
         "--db",
@@ -42,7 +42,7 @@ def main() -> None:
     import random
     random.seed(args.seed)
 
-    cli_api_key = os.environ.get("CLI_API_KEY") or os.environ.get("OPENAI_API_KEY", "")
+    cli_api_key = os.environ.get("OPENAI_API_KEY", "")
     run_cli(
         base_url=args.base_url,
         model=args.model,

@@ -105,6 +105,7 @@ type MapNode = {
 };
 
 type Minister = {
+  id?: string;
   name: string;
   office: string;
   office_type: string;
@@ -112,6 +113,7 @@ type Minister = {
   style: string;
   summary: string;
   favorite: boolean;
+  portrait_id?: string;  // 空/undefined=无专属，前端 fallback 到池
   skills: Array<{ id: string; name: string; sources: string[]; description: string }>;
 };
 
@@ -217,6 +219,7 @@ type GameState = {
   armies: Army[];
   map_nodes: MapNode[];
   ministers: Minister[];
+  consorts: Minister[];
   directives: Directive[];
   pending_count: number;
   last_decree: string;
@@ -440,7 +443,9 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = React.useState<string>("");
   const [mapIntelOpen, setMapIntelOpen] = React.useState(false);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [haremDrawerOpen, setHaremDrawerOpen] = React.useState(false);
   const [ministerGroup, setMinisterGroup] = React.useState("内阁");
+  const [haremGroup, setHaremGroup] = React.useState("全部");
   const [selectedMinister, setSelectedMinister] = React.useState<string>("");
   const [activeModal, setActiveModal] = React.useState<ModalName>("none");
   const [chat, setChat] = React.useState<ChatMessage[]>([]);
@@ -535,7 +540,9 @@ function App() {
 
   const selectedNode = state.map_nodes.find((node) => node.id === selectedNodeId) || state.map_nodes[0];
   const ministers = filterMinisters(state.ministers, ministerGroup);
-  const activeMinister = selectedMinister ? state.ministers.find((minister) => minister.name === selectedMinister) || null : null;
+  const consorts = filterConsorts(state.consorts || [], haremGroup);
+  const allCharacters = [...state.ministers, ...(state.consorts || [])];
+  const activeMinister = selectedMinister ? allCharacters.find((m) => m.name === selectedMinister) || null : null;
   const mapIntelStyle = selectedNode ? getMapIntelStyle(selectedNode) : undefined;
 
   const openChat = (minister: Minister) => {
@@ -824,8 +831,19 @@ function App() {
         selectedMinister={selectedMinister}
         open={drawerOpen}
         onGroupChange={setMinisterGroup}
-        onToggle={() => setDrawerOpen((current) => !current)}
+        onToggle={() => { setDrawerOpen((current) => !current); }}
         onClose={guardClose(() => setDrawerOpen(false))}
+        onOpenChat={openChat}
+      />
+
+      <HaremDrawer
+        consorts={consorts}
+        haremGroup={haremGroup}
+        selectedMinister={selectedMinister}
+        open={haremDrawerOpen}
+        onGroupChange={setHaremGroup}
+        onToggle={() => { setHaremDrawerOpen((current) => !current); }}
+        onClose={guardClose(() => setHaremDrawerOpen(false))}
         onOpenChat={openChat}
       />
 
@@ -985,8 +1003,72 @@ function SettlementLock({
   );
 }
 
+function MinisterPortrait({ primary, fallback, name }: { primary: string; fallback?: string; name: string }) {
+  // 两级 fallback：primary（专属）→ fallback（pool 预设）→ 占位符
+  const [stage, setStage] = React.useState<"primary" | "fallback" | "placeholder">(
+    fallback ? "primary" : (primary ? "primary" : "placeholder")
+  );
+  const src = stage === "primary" ? primary : stage === "fallback" ? (fallback ?? "") : "";
+  if (stage === "placeholder") {
+    return <div className="minister-card-portrait-placeholder">臣</div>;
+  }
+  return (
+    <img
+      className="minister-card-portrait"
+      src={src}
+      alt={name}
+      onError={() => {
+        if (stage === "primary" && fallback) setStage("fallback");
+        else setStage("placeholder");
+      }}
+    />
+  );
+}
+
+function MinisterCardList({
+  list,
+  portraitPrefix,
+  selectedMinister,
+  emptyNote,
+  onOpenChat,
+}: {
+  list: Minister[];
+  portraitPrefix: string;
+  selectedMinister: string;
+  emptyNote: string;
+  onOpenChat: (minister: Minister) => void;
+}) {
+  return (
+    <div className="minister-list">
+      {list.map((minister) => {
+        // 优先用专属头像（按姓名或 id 查找），无则用 portrait_id（池编号），再无则占位符
+        const dedicated = `/portraits/${portraitPrefix}${minister.id ?? minister.name}.png`;
+        const poolFallback = minister.portrait_id ? `/portraits/${minister.portrait_id}.png` : undefined;
+        return (
+          <button
+            key={minister.name}
+            className={`minister-card ${selectedMinister === minister.name ? "selected" : ""}`}
+            onClick={() => onOpenChat(minister)}
+          >
+            <MinisterPortrait primary={dedicated} fallback={poolFallback} name={minister.name} />
+            <div className="minister-card-info">
+              <div className="minister-card-top">
+                <span className="minister-name">{minister.name}</span>
+                <span className="minister-office">{minister.office}</span>
+              </div>
+              <span className="minister-bio">{minister.summary}</span>
+            </div>
+            {minister.favorite && <Star className="favorite-mark" size={13} />}
+          </button>
+        );
+      })}
+      {!list.length && <div className="empty-note">{emptyNote}</div>}
+    </div>
+  );
+}
+
 function CourtDrawer({
-  state,
+  state: _state,
   ministers,
   ministerGroup,
   selectedMinister,
@@ -1008,54 +1090,110 @@ function CourtDrawer({
 }) {
   React.useEffect(() => {
     if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
   return (
     <>
-      <button className={`court-toggle ${open ? "open" : ""}`} onClick={onToggle} aria-expanded={open} aria-label="打开朝堂">
-        <Landmark size={18} />
-        <span>朝堂</span>
-      </button>
-      {open && <button className="drawer-scrim" aria-label="收起朝堂" onClick={onClose} />}
+      <div className="court-toggle-group">
+        <button className="court-toggle-btn" onClick={onToggle} aria-label="打开朝堂">
+          <Landmark size={16} /><span>朝堂</span>
+        </button>
+      </div>
+      {open && <button className="drawer-scrim" aria-label="收起" onClick={onClose} />}
       <aside className={`court-drawer overlay-panel ${open ? "open" : ""}`}>
         <div className="drawer-brand">
           <div className="panel-title">
             <Landmark size={17} />
-            <span>朝堂快捷</span>
+            <span>朝堂</span>
           </div>
-          <button className="icon-button" aria-label="收起朝堂" onClick={onClose}>
-            <X size={16} />
-          </button>
+          <button className="icon-button" aria-label="收起" onClick={onClose}><X size={16} /></button>
         </div>
         <div className="segmented">
           {["内阁", "六部", "收藏", "全部"].map((group) => (
-            <button className={ministerGroup === group ? "active" : ""} key={group} onClick={() => onGroupChange(group)}>
+            <button
+              className={ministerGroup === group ? "active" : ""}
+              key={group}
+              onClick={() => onGroupChange(group)}
+            >
               {group}
             </button>
           ))}
         </div>
-        <div className="minister-list">
-          {ministers.map((minister) => (
+        <MinisterCardList
+          list={ministers}
+          portraitPrefix="minister_"
+          selectedMinister={selectedMinister}
+          emptyNote="此栏暂无可召见大臣。"
+          onOpenChat={onOpenChat}
+        />
+      </aside>
+    </>
+  );
+}
+
+function HaremDrawer({
+  consorts,
+  haremGroup,
+  selectedMinister,
+  open,
+  onGroupChange,
+  onToggle,
+  onClose,
+  onOpenChat,
+}: {
+  consorts: Minister[];
+  haremGroup: string;
+  selectedMinister: string;
+  open: boolean;
+  onGroupChange: (group: string) => void;
+  onToggle: () => void;
+  onClose: () => void;
+  onOpenChat: (minister: Minister) => void;
+}) {
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  return (
+    <>
+      <div className="harem-toggle-group">
+        <button className="court-toggle-btn harem-btn" onClick={onToggle} aria-label="打开后宫">
+          <Crown size={16} /><span>后宫</span>
+        </button>
+      </div>
+      {open && <button className="drawer-scrim" aria-label="收起" onClick={onClose} />}
+      <aside className={`court-drawer harem-drawer overlay-panel ${open ? "open" : ""}`}>
+        <div className="drawer-brand">
+          <div className="panel-title">
+            <Crown size={17} />
+            <span>后宫</span>
+          </div>
+          <button className="icon-button" aria-label="收起" onClick={onClose}><X size={16} /></button>
+        </div>
+        <div className="segmented">
+          {["全部", "收藏"].map((group) => (
             <button
-              key={minister.name}
-              className={`minister-card ${selectedMinister === minister.name ? "selected" : ""}`}
-              onClick={() => onOpenChat(minister)}
+              className={haremGroup === group ? "active" : ""}
+              key={group}
+              onClick={() => onGroupChange(group)}
             >
-              <div className="minister-card-top">
-                <span className="minister-name">{minister.name}</span>
-                <span className="minister-office">{minister.office}</span>
-              </div>
-              <span className="minister-bio">{minister.summary}</span>
-              {minister.favorite && <Star className="favorite-mark" size={13} />}
+              {group}
             </button>
           ))}
-          {!ministers.length && <div className="empty-note">此栏暂无可召见大臣。</div>}
         </div>
+        <MinisterCardList
+          list={consorts}
+          portraitPrefix="consort_"
+          selectedMinister={selectedMinister}
+          emptyNote="后宫暂无可召见之人。"
+          onOpenChat={onOpenChat}
+        />
       </aside>
     </>
   );
@@ -2527,6 +2665,11 @@ function filterMinisters(ministers: Minister[], group: string) {
   if (group === "六部") return ministers.filter((minister) => ["吏部", "户部", "礼部", "兵部", "刑部", "工部"].includes(minister.office_type));
   if (group === "收藏") return ministers.filter((minister) => minister.favorite);
   return ministers;
+}
+
+function filterConsorts(consorts: Minister[], group: string) {
+  if (group === "收藏") return consorts.filter((c) => c.favorite);
+  return consorts;
 }
 
 function GrandMap({ nodes, selectedId, onSelect }: { nodes: MapNode[]; selectedId: string; onSelect: (id: string) => void }) {

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import Dict, List, Optional
 
 from agno.agent import Agent
@@ -65,6 +66,66 @@ def build_court_brief(context: CourtContext) -> str:
     )
 
 
+def _make_cultivate_tool(character: Character, context: CourtContext):
+    """生成后宫调教 tool，绑定到当前妃嫔。"""
+    name = character.name
+
+    def cultivate_consort(skill: str = "", trait: str = "") -> str:
+        """皇帝调教妃嫔，为其新增技能或改变性格。skill：新增技能名（如"书法精通"），可为空；trait：新增性格词（如"更加温婉"），可为空。效果永久生效，下次召见时体现在人物描述中。"""
+        context.db.cultivate_consort(
+            name, context.state.turn, skill=skill.strip(), trait=trait.strip()
+        )
+        parts = []
+        if skill.strip():
+            parts.append(f"习得技能「{skill.strip()}」")
+        if trait.strip():
+            parts.append(f"性情添了「{trait.strip()}」")
+        if not parts:
+            return "未指定技能或性格，调教无效。"
+        return "已记录：" + "、".join(parts) + "。下次召见时将体现。"
+
+    return cultivate_consort
+
+
+def _make_select_consort_tool(context: CourtContext):
+    """生成选妃呈名单 tool，挂在司礼监/礼部大臣上。
+    从尚未入宫的待选采女池（status=candidate 的后宫人物）随机抽 N 人，
+    呈上基本信息供皇帝挑选。只展示不入库——皇帝看中后另下诏册封，走 candidate 升格路径。"""
+
+    def present_consort_candidates(count: int = 3) -> str:
+        """【司礼监/礼部专属】皇帝下旨选妃/采选秀女时，由内官（尚宫局）会同礼部从备选采女中
+        遴选若干名，呈上她们的姓名、性情、才艺供御览。皇帝看中哪位，再另降诏书册封入宫。
+
+        参数：
+        - count：本次呈选人数，1-6 之间。皇帝没说就默认 3。
+
+        仅当皇帝明确表达「选妃」「采选秀女」「为朕物色后宫」等意图时调此 tool。
+        """
+        content = _ctx()
+        pool = [
+            c for c in content.characters.values()
+            if c.office_type == "后宫" and getattr(c, "status", "") == "candidate"
+        ]
+        if not pool:
+            return "回禀陛下，备选采女已尽数入宫或遣散，眼下并无可供遴选之人。"
+        n = max(1, min(6, int(count) if str(count).strip() else 3))
+        chosen = random.sample(pool, min(n, len(pool)))
+        lines = ["臣等已从待选采女中遴选数名，恭呈御览："]
+        for idx, c in enumerate(chosen, 1):
+            skills = "、".join(c.personal_skills) if c.personal_skills else "—"
+            summary = (c.summary or "").strip()
+            if len(summary) > 50:
+                summary = summary[:50] + "…"
+            lines.append(
+                f"{idx}. {c.name}　性情：{c.style or '—'}　才艺：{skills}"
+                + (f"　{summary}" if summary else "")
+            )
+        lines.append("陛下若有中意者，可降诏册封其位份，即可入宫。")
+        return "\n".join(lines)
+
+    return present_consort_candidates
+
+
 def create_minister_agent(
     character: Character,
     llm_config: LLMConfig,
@@ -79,17 +140,47 @@ def create_minister_agent(
     # 每月动态上下文（钱粮、奏报、地区、军队、派系）由 MinisterRegistry 在 agent 创建后通过首轮
     # user message 喂入，不污染 system prompt。
     c = _ctx()
-    instructions = [
-        c.game_world_prompt,
-        c.minister_agent_prompt,
-        f"你当前扮演：{character_context_with_db(character, context.db)}。",
-        f"你与皇帝的多轮对话会持续到本{TURN_UNIT}退朝；同一{TURN_UNIT}复召时要接续此前奏对，不要重置记忆。",
-        f"进殿前，皇帝会先把本{TURN_UNIT}奏报、钱粮、地区、军队和派系态势作为一段 JSON 上下文喂给你；"
-        "你只需简短回一句臣已知会，然后等皇帝问话。所有动态数据均可随时通过工具复查。",
-        "【退殿规则】只有皇帝的输入中明确出现退下指令（如：退下、好去办吧、朕知道了卿退下等），"
-        "才可调 dismiss_minister() 结束本次对话；皇帝要召见别人（如：传袁崇焕来）才可调 summon_minister(name)。"
-        "禁止因自己的角色扮演台词（如写了退场动作）而主动调这两个 tool。等皇帝指令，不要自行判断。",
-    ]
+    is_consort = character.office_type == "后宫"
+    if is_consort:
+        # 从 DB 取调教记录
+        cultivated = context.db.get_consort_traits(character.name)
+        extra_skills_str = ("、".join(cultivated["extra_skills"])) if cultivated["extra_skills"] else ""
+        extra_traits_str = ("、".join(cultivated["extra_traits"])) if cultivated["extra_traits"] else ""
+        cultivate_desc = ""
+        if extra_skills_str:
+            cultivate_desc += f"经皇帝调教后习得：{extra_skills_str}。"
+        if extra_traits_str:
+            cultivate_desc += f"性情逐渐变化：{extra_traits_str}。"
+        instructions = [
+            c.game_world_prompt,
+            c.consort_agent_prompt,
+            f"你当前扮演：{character.name}，{character.office}，性格{character.style}，"
+            f"擅长：{'、'.join(character.personal_skills)}。个人简介：{character.summary}"
+            + (f"\n{cultivate_desc}" if cultivate_desc else ""),
+            f"你与皇帝的对话在后宫寝殿；同一回合复召时接续此前对话，不要重置记忆。",
+        ]
+        tools = [_make_cultivate_tool(character, context)]
+    else:
+        instructions = [
+            c.game_world_prompt,
+            c.minister_agent_prompt,
+            f"你当前扮演：{character_context_with_db(character, context.db)}。",
+            f"你与皇帝的多轮对话会持续到本{TURN_UNIT}退朝；同一{TURN_UNIT}复召时要接续此前奏对，不要重置记忆。",
+            f"进殿前，皇帝会先把本{TURN_UNIT}奏报、钱粮、地区、军队和派系态势作为一段 JSON 上下文喂给你；"
+            "你只需简短回一句臣已知会，然后等皇帝问话。所有动态数据均可随时通过工具复查。",
+            "【退殿规则】只有皇帝的输入中明确出现退下指令（如：退下、好去办吧、朕知道了卿退下等），"
+            "才可调 dismiss_minister() 结束本次对话；皇帝要召见别人（如：传袁崇焕来）才可调 summon_minister(name)。"
+            "禁止因自己的角色扮演台词（如写了退场动作）而主动调这两个 tool。等皇帝指令，不要自行判断。",
+        ]
+        tools = build_minister_tools(character, context)
+        # 司礼监（内官管后宫）与礼部（议礼册封）可奉旨选妃，从待选采女池呈名单。
+        if character.office_type in ("司礼监", "礼部"):
+            tools.append(_make_select_consort_tool(context))
+            instructions.append(
+                "【选妃职责】皇帝若下旨选妃、采选秀女、为后宫物色佳丽，"
+                "你可调 present_consort_candidates(count) 从待选采女中遴选数名呈御览。"
+                "皇帝看中者会另降册封诏书，不必你拟旨。"
+            )
     return Agent(
         name=character.name,
         id=f"minister-{character.name}",
@@ -97,7 +188,7 @@ def create_minister_agent(
         db=agno_db,
         model=model,
         instructions=instructions,
-        tools=build_minister_tools(character, context),
+        tools=tools,
         add_history_to_context=True,
         num_history_runs=6,
         tool_call_limit=5,
@@ -125,6 +216,10 @@ class MinisterRegistry:
         self._court_brief: str = build_court_brief(context)
         for character in characters.values():
             self.agents[character.name] = self._create(character)
+        # 后宫（office_type="后宫"）跳过月初 brief
+        for character in characters.values():
+            if character.office_type == "后宫":
+                self.briefed.add(character.name)
 
     def _create(self, character: Character) -> Agent:
         return create_minister_agent(

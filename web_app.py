@@ -35,6 +35,7 @@ from ming_sim.issues import _format_issue_ongoing
 from ming_sim.session import GameSession
 from ming_sim.skills import available_skill_ids, skill_display_name, skill_source_labels
 from ming_sim.context import match_minister_from_text
+from ming_sim.flows import calc_province_fiscal
 from ming_sim.exceptions import LLMContractError  # noqa: F401  (保留：供错误处理)
 from ming_sim.models import Character, LLMConfig, monthly_amount
 
@@ -225,6 +226,7 @@ class WebGame:
             "faction": character.faction,
             "style": character.style,
             "summary": f"{character.office}，{character.faction}一系，行事{character.style}。",
+            "portrait_id": character.portrait_id,  # 空串=无专属头像，前端 fallback 到池
             "skills": [
                 {
                     "id": skill_id,
@@ -369,36 +371,34 @@ class WebGame:
 
     def budget_payload(self) -> Dict[str, Any]:
         cfg = self.db.get_fiscal_config()
-        land_base = self.db.conn.execute("SELECT SUM(tax_per_turn) FROM regions").fetchone()[0] or 0
         army_total = self.db.conn.execute("SELECT SUM(maintenance_per_turn) FROM armies").fetchone()[0] or 0
 
         def rated(base: int, rate_key: str) -> int:
             return monthly_amount(round(int(base) * cfg.get(rate_key, 100) / 100))
 
+        # 用动态省级财政模型预测本月国库收入（与实际结算算法一致）
+        guo_income_est, _nei_income_est, _province_details = calc_province_fiscal(self.state, self.db)
+
         budget = {
             "国库": {
                 "balance": int(self.state.metrics["国库"]),
                 "income": [
-                    {"name": "田赋", "amount": rated(int(land_base), "田赋_rate"), "note": "两京十三省田赋实收"},
-                    {"name": "辽饷", "amount": rated(cfg.get("辽饷_base", 130), "辽饷_rate"), "note": "辽东专项加派实收"},
-                    {"name": "盐税", "amount": rated(cfg.get("盐税_base", 55), "盐税_rate"), "note": "两淮两浙盐引定额"},
-                    {"name": "商税", "amount": rated(cfg.get("商税_base", 8), "商税_rate"), "note": "各地关卡店税汇总"},
+                    {"name": "田赋辽饷盐商", "amount": int(guo_income_est), "note": "各省田赋+辽饷+盐税+商税（按腐败度/士绅阻力/民变动态折算）"},
                 ],
                 "expense": [
-                    {"name": "各军军饷", "amount": monthly_amount(int(army_total)), "note": "各军月度维护/军饷合计"},
+                    {"name": "各军军饷", "amount": int(army_total), "note": "各军月度维护/军饷合计"},
                     {"name": "宗室禄米", "amount": rated(cfg.get("宗室禄米_base", 80), "宗室禄米_rate"), "note": "诸藩宗室月禄米"},
                     {"name": "百官俸禄", "amount": rated(cfg.get("官俸_base", 35), "官俸_rate"), "note": "在京百官月俸禄"},
                     {"name": "工部", "amount": rated(cfg.get("工程_base", 22), "工程_rate"), "note": "工部月维护支出"},
                     {"name": "赈灾备用", "amount": rated(cfg.get("赈灾_base", 25), "赈灾_rate"), "note": "制度性赈灾预留"},
-                    {"name": "九边补给", "amount": rated(cfg.get("九边补给_base", 130), "九边补给_rate"), "note": "九边月粮草补给"},
                 ],
             },
             "内库": {
                 "balance": int(self.state.metrics["内库"]),
                 "income": [
-                    {"name": "皇庄", "amount": rated(cfg.get("皇庄_base", 18), "皇庄_rate"), "note": "皇庄地租月上缴"},
-                    {"name": "织造", "amount": rated(cfg.get("织造_base", 12), "织造_rate"), "note": "苏杭织造局月上缴"},
-                    {"name": "矿税", "amount": rated(cfg.get("矿税_base", 5), "矿税_rate"), "note": "矿税残余"},
+                    {"name": "皇庄", "amount": rated(cfg.get("皇庄_base", 60), "皇庄_rate"), "note": "皇庄地租月上缴"},
+                    {"name": "织造", "amount": rated(cfg.get("织造_base", 35), "织造_rate"), "note": "苏杭织造局月上缴"},
+                    {"name": "矿税", "amount": rated(cfg.get("矿税_base", 10), "矿税_rate"), "note": "矿税残余"},
                 ],
                 "expense": [
                     {"name": "宫廷开支", "amount": rated(cfg.get("宫廷_base", 18), "宫廷_rate"), "note": "皇室日常用度"},
@@ -409,23 +409,26 @@ class WebGame:
         }
         # 建筑产出/维护并入内库固定栏（按当前 condition 折算的月预算）
         building_rows = self.db.conn.execute(
-            "SELECT name, condition, maintenance, output_metric, output_amount FROM buildings"
+            "SELECT name, category, condition, maintenance, output_metric, output_amount FROM buildings"
         ).fetchall()
-        bld_produce = 0
-        bld_maintain = 0
+        bld_produce_by_acc: dict[str, int] = {"国库": 0, "内库": 0}
+        bld_maintain_by_acc: dict[str, int] = {"国库": 0, "内库": 0}
         for br in building_rows:
             cond = max(0, min(100, int(br["condition"])))
-            if br["output_metric"] in ("国库", "内库") and br["output_amount"]:
-                bld_produce += round(int(br["output_amount"]) * cond / 100)
-            bld_maintain += max(0, int(br["maintenance"]))
-        if bld_produce > 0:
-            budget["内库"]["income"].append(
-                {"name": "建筑产出", "amount": int(bld_produce), "note": "皇庄/铸炮/市舶等月产出"}
-            )
-        if bld_maintain > 0:
-            budget["内库"]["expense"].append(
-                {"name": "建筑维护", "amount": int(bld_maintain), "note": "各建筑月维护合计"}
-            )
+            out_acc = str(br["output_metric"] or "")
+            if out_acc in ("国库", "内库") and br["output_amount"]:
+                bld_produce_by_acc[out_acc] += round(int(br["output_amount"]) * cond / 100)
+            maint_acc = "内库" if str(br["category"] or "") == "内廷" else "国库"
+            bld_maintain_by_acc[maint_acc] += max(0, int(br["maintenance"]))
+        for acc in ("国库", "内库"):
+            if bld_produce_by_acc[acc] > 0:
+                budget[acc]["income"].append(
+                    {"name": "建筑产出", "amount": bld_produce_by_acc[acc], "note": "建筑月产出"}
+                )
+            if bld_maintain_by_acc[acc] > 0:
+                budget[acc]["expense"].append(
+                    {"name": "建筑维护", "amount": bld_maintain_by_acc[acc], "note": "建筑月维护"}
+                )
         for account in budget.values():
             income_total = sum(int(item["amount"]) for item in account["income"])
             expense_total = sum(int(item["amount"]) for item in account["expense"])
@@ -438,9 +441,9 @@ class WebGame:
         # 过滤掉固定收支（已在上方"固定收入/固定支出"展示），只列一次性流水
         # （清丈追缴、抄家、赈济临支、亏空压力等 LLM 推演产物）。
         FIXED_CATEGORIES = {
-            # 国库固定
-            "田赋", "辽饷", "盐税", "商税",
-            "各军军饷", "宗室禄米", "百官俸禄", "工部", "赈灾备用", "九边补给",
+            # 国库固定（category 以 ledger 实际写入值为准）
+            "田赋辽饷盐商", "田赋", "辽饷", "盐税", "商税",
+            "各军军饷", "宗室禄米", "百官俸禄", "工部", "赈灾备用",
             # 内库固定
             "皇庄", "织造", "矿税",
             "宫廷开支", "内廷俸禄", "妃嫔供奉",
@@ -491,7 +494,8 @@ class WebGame:
             "regions": self.db.region_payload(),
             "armies": self.db.army_payload(),
             "map_nodes": self.map_nodes(),
-            "ministers": [self.public_character(c) for c in self.content.characters.values()],
+            "ministers": [self.public_character(c) for c in self.content.characters.values() if c.office_type != "后宫"],
+            "consorts": [self.public_character(c) for c in self.content.characters.values() if c.office_type == "后宫" and c.status == "active"],
             "directives": directives,
             "pending_count": self.session.pending_count(),
             "last_decree": self.last_decree,
@@ -696,26 +700,28 @@ async def api_buildings(region_id: str = "") -> Dict[str, Any]:
 
 
 @app.get("/api/ministers")
-async def api_ministers(group: str = "全部") -> Dict[str, Any]:
-    # 只列 active：offstage 未登场、dead/dismissed/imprisoned/exiled/retired 不能召见。
+async def api_ministers(group: str = "全部", kind: str = "court") -> Dict[str, Any]:
+    is_harem = kind == "harem"
     ministers = [
         web_game.public_character(c)
         for c in web_game.content.characters.values()
-        if web_game.db.get_character_status(c.name)[0] == "active"
+        if (c.office_type == "后宫") == is_harem
+        and web_game.db.get_character_status(c.name)[0] == "active"
     ]
-    if group == "内阁":
-        ministers = [item for item in ministers if item["office_type"] == "内阁"]
-    elif group == "六部":
-        ministers = [item for item in ministers if item["office_type"] in {"吏部", "户部", "礼部", "兵部", "刑部", "工部"}]
-    elif group == "收藏":
-        ministers = [item for item in ministers if item["name"] in web_game.favorites]
+    if not is_harem:
+        if group == "内阁":
+            ministers = [m for m in ministers if m["office_type"] == "内阁"]
+        elif group == "六部":
+            ministers = [m for m in ministers if m["office_type"] in {"吏部", "户部", "礼部", "兵部", "刑部", "工部"}]
+    if group == "收藏":
+        ministers = [m for m in ministers if m["name"] in web_game.favorites]
     return {"group": group, "ministers": ministers}
 
 
 @app.post("/api/favorites/{minister_name}")
 async def api_add_favorite(minister_name: str) -> Dict[str, Any]:
     if minister_name not in web_game.content.characters:
-        raise HTTPException(status_code=404, detail=f"未找到大臣：{minister_name}")
+        raise HTTPException(status_code=404, detail=f"未找到：{minister_name}")
     web_game.favorites.add(minister_name)
     return {"favorites": sorted(web_game.favorites)}
 
@@ -734,7 +740,7 @@ _STATUS_LABEL_WEB = {
 
 def _require_active_minister(minister_name: str) -> None:
     if minister_name not in web_game.content.characters:
-        raise HTTPException(status_code=404, detail=f"未找到大臣：{minister_name}")
+        raise HTTPException(status_code=404, detail=f"未找到人物：{minister_name}")
     status, reason = web_game.db.get_character_status(minister_name)
     if status != "active":
         label = _STATUS_LABEL_WEB.get(status, status)
@@ -901,6 +907,34 @@ class LLMConfigRequest(BaseModel):
     base_url: str = ""
     model: str = ""
     api_key: str = ""
+
+
+@app.get("/api/consorts/candidates")
+async def api_consort_candidates() -> Dict[str, Any]:
+    """返回 status=candidate 的待选秀女，供选妃事件展示。"""
+    candidates = [
+        web_game.public_character(c)
+        for c in web_game.content.characters.values()
+        if c.office_type == "后宫" and c.status == "candidate"
+    ]
+    return {"candidates": candidates}
+
+
+@app.post("/api/consorts/{name}/select")
+async def api_select_consort(name: str) -> Dict[str, Any]:
+    """皇帝选中某秀女，转 active 并赋予初始位份。"""
+    consort = web_game.content.characters.get(name)
+    if consort is None or consort.office_type != "后宫":
+        raise HTTPException(status_code=404, detail=f"未找到候选秀女：{name}")
+    if consort.status != "candidate":
+        raise HTTPException(status_code=409, detail=f"{name} 当前状态为 {consort.status}，不可再选。")
+    # 转 active
+    consort.status = "active"
+    consort.office = "嫔"  # 初始位份：嫔
+    # 同步进 registry（新增 agent）
+    web_game.session.registry.register(consort)
+    web_game.chat_history.setdefault(name, [])
+    return {"selected": web_game.public_character(consort)}
 
 
 @app.get("/api/saves")

@@ -24,7 +24,7 @@
 | 邸报章节典型主题 | 抽到哪些字段 |
 |---|---|
 | 人事任免（擢/拜/起/迁/补 + 革职/下狱/赐死/致仕/卒）| `appointments`、`character_status_changes`、配套 `faction_delta`、`metric_delta` |
-| 地方动静（清丈/抗税/民变/灾荒/赈济）| `region_delta`、`class_delta`、`economy_moves`（赈灾银）、配套 `issue_advances` |
+| 地方动静（清丈/抗税/民变/灾荒/赈济）| `region_delta`（含 `corruption`，见下注）、`class_delta`、`economy_moves`（赈灾银）、配套 `issue_advances` |
 | 军事战事（欠饷/哗变/调度/战报）| `army_delta`、配套 `external_power_updates`、`economy_moves`（军饷追拨）|
 | 局势推进（既有 issue 的具体进展/结案/失败）| `issue_advances`、`close_issues`、`cancels`、配套 `metric_delta`/`faction_delta` |
 | 财政诏令（开征/削减/盐政/工程）| `fiscal_changes`、`economy_moves`、配套 `class_delta` |
@@ -62,6 +62,15 @@
 - 写 `appointments` 前先在 payload `active_ministers` / `offstage_ministers` 名册查此人是否已在册（已在册的不立 appointments，改任仅归 narrative）。
 - 写 `character_status_changes` 前先在 `active_ministers` 查此人当前是否 active（已 dismissed/dead 的不重复立项）。
 
+**⚠ corruption 强制核查**：凡邸报或诏书中出现以下任一动作，**必须**在对应省份 `region_delta` 输出 `corruption` 负值：
+- 锦衣卫/东厂南下彻查、抄家、逮捕贪官胥吏
+- 巡按御史出巡、清查亏空、追赃
+- 整治贪腐、查处截留/火耗/黑吃黑
+- 处决/廷杖腐败官员（幅度比抓押更大）
+
+典型幅度：轻度彻查 -5~-8，抓押数人 -10~-15，大规模查抄/杀头 -15~-20。
+对应省份当前 `corruption` 值在 payload `regions` 表的 `corruption` 列可查（`cols` 里找下标）。
+
 ## 输入
 
 - 本{{TURN_UNIT}}奏章原文（推演官写的邸报）
@@ -85,7 +94,7 @@
 | `economy_moves` | 浮动收支（旨意执行/事件/赏罚/查抄/赈灾追加） | 每项 `account`(国库/内库)+`delta`+`category`+`reason`。单位万两（「国库263万两(-15)」→delta=-15）。`fixed_flows` 已落账的固定项（田赋/辽饷/盐税/商税/宗室禄米/百官俸禄/工部/赈灾/九边补给/各军军饷/皇庄/织造/矿税/宫廷/内廷俸/妃嫔）**不进这里**。 |
 | `faction_delta` | 派系满意度增量（阉党/皇党/军队/东林/宗室/中立/西学） | 增量非新值。按上方「档位判定标准」选档。 |
 | `class_delta` | 阶级满意度/影响力增量。key 形如 `农民` 表全国汇总；`农民@shaanxi` 表省级切片（region_id 从 `region_ids` 选） | value 形如 `{"satisfaction": -5, "leverage": +2}`，增量非新值。两字段都可写、可只写一个。**联动靠你自觉判**：①党派强推损某阶级利益 → 该阶级 sat 跌，且该党派 sat 也跟着跌（代言失职）；②东林 ↔ 江南士绅唇齿，抄江南/苏松士绅 → 东林 lev 同向掉，杀东林台谏 → 江南士绅 sat 同向掉；③阉党 ↔ 内廷宦官+地方税监同体，极端清算阉党时其代表阶级 sat+lev 双降；④军队 ↔ 军户/将门基本盘，欠饷军户 sat 长低 → 军队党 sat 也跌；⑤宗室党 ↔ 宗藩阶级同向（削宗禄/抄藩田同时损二者）；⑥极端手段（抄家屠戮）单次 ±20~40。阶级 sat≤30 且 lev≥60 易触发该省该阶级骚乱事件，由季末推演判定。 |
-| `region_delta` | 各地区数值变化，key=region_id | key **必须**从 `region_ids` 选。合法字段仅：量表 `public_support`/`unrest`/`grain_security`/`gentry_resistance`/`military_pressure`（±10、极端 ±20）、数量 `population`/`registered_land`/`hidden_land`/`tax_per_turn`、文字 `natural_disaster`/`human_disaster`/`status`。**减人口写 `population`，不是 `manpower`（`manpower` 是军队字段，严禁写入地区）。** 无变化填 `{}`。 |
+| `region_delta` | 各地区数值变化，key=region_id | key **必须**从 `region_ids` 选。合法字段仅：量表 `public_support`/`unrest`/`grain_security`/`gentry_resistance`/`military_pressure`（±10、极端 ±20）、腐败度 `corruption`（0-100，整治贪腐/巡按/抄家→负值 ±5~±20，放任失控→正值；只在有明确整治或失控动作时才填）、数量 `population`/`registered_land`/`hidden_land`/`tax_per_turn`、文字 `natural_disaster`/`human_disaster`/`status`。**减人口写 `population`，不是 `manpower`（`manpower` 是军队字段，严禁写入地区）。** 无变化填 `{}`。 |
 | `army_delta` | 各军数值变化，key=army_id | key **必须**从 `army_ids` 选。合法字段仅：量表 `supply`/`morale`/`training`/`equipment`/`arrears`/`mobility`/`loyalty`、数量 `manpower`/`maintenance_quarter`、文字 `station`/`commander`/`controller`/`troop_type`/`status`。**`cohesion` 是外部势力字段，严禁写入。** |
 | `external_power_updates` | 外部势力数值/状态变化，key=external_power_id | key **必须**从 `external_power_ids` 选。数值字段填**增量**（「兵势72→68」→-4）：`leverage`/`satisfaction`/`military_strength`/`cohesion`/`supply`；文字填**新值**：`leader`/`stance`/`agenda`/`status`/`last_action`。 |
 | `world_advance` | 后金/蒙古/朝鲜/流寇四方动向综述 | 四方都必须有，无动作也写「无新动」。 |
@@ -94,7 +103,7 @@
 | `cancels` | 皇帝撤销的局势 | 每项 `issue_id`+`applied_cost`+`narrative`。详见「局势推进规则·撤销」。 |
 | `close_issues` | 本{{TURN_UNIT}}结案/失败的局势 | 每项 `issue_id`+`reason`(`resolved`/`failed`)+`narrative`。详见「局势推进规则·结案」。 |
 | `fiscal_changes` | 制度性财政系数变化 | 仅奏章明确提到开征新税/削减禄米/盐政改革等才写。`delta` 是增量（±5~±30 常规，±50 极端）。`key` 必须从下方「财政系数表」选，不在表内一律不写。 |
-| `appointments` | 诏书明文起用某员入朝堂 | 仅 `decree_text` 写明「擢/拜/起/迁/补 某某 为 某官」时立项。每项 `{"name","office","faction","reason","approved"}`，详见「人事任命规则」。 |
+| `appointments` | 诏书明文起用某员入朝堂，或纳妃入宫 | 仅 `decree_text` 写明「擢/拜/起/迁/补 某某 为 某官」或「纳/册封 某某 为 贵妃/嫔/才人/昭仪/婕妤」时立项。朝臣任命每项 `{"name","office","faction","reason","approved"}`；后宫纳妃每项 `{"name","office","office_type":"后宫","reason","approved"}`，详见「人事任命规则」及「后宫纳妃规则」。 |
 | `character_status_changes` | 既有大臣状态变更（罢黜/下狱/流放/致仕/死亡） | 邸报明文写「某某革职/拿问/下诏狱/赐死/缢死/流放/致仕/卒」时立项。每项 `{"name","status","reason"}`，status ∈ `dismissed`/`imprisoned`/`exiled`/`retired`/`dead`/`offstage`。详见「人物状态变更规则」。 |
 
 new_issue 内部字段：`kind`(`initiative`/`situation`)、`title`、`origin_kind`、`bar_value`(0-100 初始进度)、`expected_months`、`stage_text`、`resolve_condition`、`fail_condition`、`ongoing_effects`、`effect_on_resolve`、`effect_on_fail`、`cancellable`(`decree`=须下诏方能罢/`never`=不可撤/`by_progress`=随进度自然结案，严禁臆造其它值)。各字段取值见「局势立项规则」。
@@ -166,12 +175,31 @@ decree new_issue 必填字段：
 
 **已在名册者**（含 offstage）：不立 appointments。改任既有官员是 office 调整，目前不入此字段（暂留 narrative）。
 
-字段：
+字段（朝臣任命）：
 - `name`：拟任者姓名。
 - `office`：拟授官职（明制官名）。
 - `faction`：派系，取值须从（东林/阉党/皇党/军队/宗室/中立/西学）选，拿不准填「中立」。
 - `reason`：一句话写此人资历与任命依据，或拒因。
 - `approved`：bool。`true` 入册，`false` 拒收。
+
+## 后宫纳妃规则
+
+**仅当 `decree_text` 明文写「纳/册封/封/选 某某 为 贵妃/嫔/才人/昭仪/婕妤/淑女」时**，在 `appointments` 立一项。邸报叙事衍生的「某某晋位」不要立——那是局势衍生，归 narrative。
+
+**一道闸**：
+- `office` 必须是明制后宫位号（皇后/皇贵妃/贵妃/妃/嫔/才人/选侍/答应/昭仪/婕妤/淑女）。非明制词 → `approved:false`，reason="非明制宫廷位号"。
+- 位号合法 → `approved:true`，名字杜撰也收。
+
+**已在名册者**（含既有妃嫔 offstage）：不重复建档，归 narrative。
+
+字段（后宫纳妃，在朝臣任命基础上加一个字段）：
+- `name`：妃嫔姓名。**必须用名册里的原始全名**（如名册里是「李雪凝」，就写「李雪凝」）。全新人物也用全名，不用「李氏」「田氏」等姓氏缩写。
+- `office`：位号（贵妃/嫔/才人 等明制宫廷位号）。
+- `office_type`：**必须填 `"后宫"`**（告知代码走后宫路径，不填则按朝臣处理导致错误）。
+- `reason`：一句话写纳妃依据或拒因。
+- `approved`：bool。
+
+纳妃落地效果：若为既有 candidate，升格为 active 并保留原有性格技能；若为全新人物，新建入册。本回合即可在后宫召见；`妃嫔_base` 制度支出本月不变（下月起 fiscal_changes 按需调整）。
 
 ## 人物状态变更规则
 
@@ -205,7 +233,7 @@ decree new_issue 必填字段：
   "economy_moves": [{"account": "国库", "delta": -15, "category": "赈灾", "reason": "陕西赈粮"}],
   "faction_delta": {"阉党": -5, "东林": 4},
   "class_delta": {"农民@shaanxi": {"satisfaction": -6, "leverage": 5}},
-  "region_delta": {"shaanxi": {"unrest": 5, "grain_security": -3}},
+  "region_delta": {"shaanxi": {"unrest": 5, "grain_security": -3}, "nanzhili": {"gentry_resistance": 8, "corruption": -12}},
   "army_delta": {"guanning": {"morale": -3, "arrears": 5}},
   "external_power_updates": {"houjin": {"leverage": -4, "stance": "敌对", "last_action": "退屯整兵"}},
   "world_advance": {"后金": {"stance": "敌对", "action": "...", "impact": "...", "intent": "..."}, "蒙古": {...}, "朝鲜": {...}, "流寇": {...}, "summary": "..."},
@@ -217,7 +245,10 @@ decree new_issue 必填字段：
   "cancels": [{"issue_id": 25, "applied_cost": {"economy": [], "metrics": {}, "factions": {}}, "narrative": "..."}],
   "close_issues": [{"issue_id": 9, "reason": "resolved", "narrative": "..."}, {"issue_id": 17, "reason": "failed", "narrative": "..."}],
   "fiscal_changes": [{"key": "商税_base", "delta": 30, "reason": "..."}],
-  "appointments": [{"name": "陈奇瑜", "office": "陕西巡按", "faction": "中立", "reason": "...", "approved": true}],
+  "appointments": [
+    {"name": "陈奇瑜", "office": "陕西巡按", "faction": "中立", "reason": "...", "approved": true},
+    {"name": "田氏", "office": "贵妃", "office_type": "后宫", "reason": "诏书明文册封", "approved": true}
+  ],
   "character_status_changes": [{"name": "魏忠贤", "status": "exiled", "reason": "发配凤阳"}]
 }
 ```
