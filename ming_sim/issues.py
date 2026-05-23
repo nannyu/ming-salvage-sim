@@ -634,8 +634,13 @@ def apply_score_extraction(
     db: GameDB,
     state: GameState,
     extracted: Dict[str, object],
+    content=None,
+    registry=None,
 ) -> Dict[str, object]:
-    """落地结算 agent 输出的 JSON 到 state 与 db。"""
+    """落地结算 agent 输出的 JSON 到 state 与 db。
+
+    content/registry：若传入则处理 `appointments`——把诏书任命的新人建档入朝。
+    缺省则跳过（向后兼容老调用）。"""
     # 1) metric_delta
     applied_metric = _apply_metric_dict(state, extracted.get("metric_delta") or {})
     # 2) economy_moves
@@ -711,6 +716,71 @@ def apply_score_extraction(
             "reason": str(change.get("reason") or ""),
         })
 
+    # 8) appointments：诏书明文起用的官员（档房三道闸 approved=true 才落）
+    applied_appointments: List[Dict[str, object]] = []
+    if content is not None:
+        from ming_sim.session import apply_appointment  # 延迟导入避循环
+        for item in extracted.get("appointments") or []:
+            if not isinstance(item, dict):
+                continue
+            name = apply_appointment(db, state, content, registry, item)
+            if name:
+                applied_appointments.append({
+                    "name": name,
+                    "office": str(item.get("office") or ""),
+                    "faction": str(item.get("faction") or "中立"),
+                    "reason": str(item.get("reason") or ""),
+                })
+            else:
+                rejected_name = str(item.get("name") or "").strip()
+                if rejected_name:
+                    applied_appointments.append({
+                        "name": rejected_name,
+                        "office": str(item.get("office") or ""),
+                        "rejected": True,
+                        "reason": str(item.get("reason") or ""),
+                        "approved": bool(item.get("approved", True)),
+                    })
+
+    # 9) character_status_changes：LLM 判定的既有大臣去向（罢/狱/流/致仕/死）
+    applied_status_changes: List[Dict[str, object]] = []
+    valid_status = {"dismissed", "imprisoned", "exiled", "retired", "dead", "offstage"}
+    for item in extracted.get("character_status_changes") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        status = str(item.get("status") or "").strip().lower()
+        reason = str(item.get("reason") or "").strip()
+        if not name or status not in valid_status:
+            applied_status_changes.append({
+                "name": name, "status": status, "rejected": True,
+                "reason": "name 空 或 status 非白名单",
+            })
+            continue
+        if content is not None and name not in content.characters:
+            applied_status_changes.append({
+                "name": name, "status": status, "rejected": True,
+                "reason": "非既有大臣（新任走 appointments）",
+            })
+            continue
+        cur_status, _ = db.get_character_status(name)
+        if cur_status != "active":
+            applied_status_changes.append({
+                "name": name, "status": status, "rejected": True,
+                "reason": f"当前非 active（{cur_status}）",
+            })
+            continue
+        try:
+            db.set_character_status(state, name, status, reason)
+        except Exception as exc:
+            applied_status_changes.append({
+                "name": name, "status": status, "rejected": True, "reason": f"落库失败：{exc}",
+            })
+            continue
+        applied_status_changes.append({
+            "name": name, "status": status, "reason": reason,
+        })
+
     state.clamp()
     return {
         "metric_delta": applied_metric,
@@ -723,6 +793,8 @@ def apply_score_extraction(
         "issue_summary": issue_summary,
         "world_advance": extracted.get("world_advance") or {},
         "fiscal_changes": applied_fiscal,
+        "appointments": applied_appointments,
+        "character_status_changes": applied_status_changes,
         "victory_status": victory_status(db, state),
     }
 

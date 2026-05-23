@@ -26,7 +26,7 @@
 
 ## 输出字段总表（每个字段的含义与约束，先看清这张表）
 
-顶层 13 个字段都**必须出现**；无内容的填空 `{}` 或 `[]`。严格 JSON，无 Markdown 无解释。
+顶层 15 个字段都**必须出现**；无内容的填空 `{}` 或 `[]`。严格 JSON，无 Markdown 无解释。
 
 | 字段 | 含义 | 约束 |
 |---|---|---|
@@ -43,6 +43,8 @@
 | `cancels` | 皇帝撤销的局势 | 每项 `issue_id`+`applied_cost`+`narrative`。详见「局势推进规则·撤销」。 |
 | `close_issues` | 本{{TURN_UNIT}}结案/失败的局势 | 每项 `issue_id`+`reason`(`resolved`/`failed`)+`narrative`。详见「局势推进规则·结案」。 |
 | `fiscal_changes` | 制度性财政系数变化 | 仅奏章明确提到开征新税/削减禄米/盐政改革等才写。`delta` 是增量（±5~±30 常规，±50 极端）。`key` 必须从下方「财政系数表」选，不在表内一律不写。 |
+| `appointments` | 诏书明文起用某员入朝堂 | 仅 `decree_text` 写明「擢/拜/起/迁/补 某某 为 某官」时立项。每项 `{"name","office","faction","reason","approved"}`，详见「人事任命规则」。 |
+| `character_status_changes` | 既有大臣状态变更（罢黜/下狱/流放/致仕/死亡） | 邸报明文写「某某革职/拿问/下诏狱/赐死/缢死/流放/致仕/卒」时立项。每项 `{"name","status","reason"}`，status ∈ `dismissed`/`imprisoned`/`exiled`/`retired`/`dead`/`offstage`。详见「人物状态变更规则」。 |
 
 new_issue 内部字段：`kind`(`initiative`/`situation`)、`title`、`origin_kind`、`bar_value`(0-100 初始进度)、`expected_months`、`stage_text`、`resolve_condition`、`fail_condition`、`ongoing_effects`、`effect_on_resolve`、`effect_on_fail`、`cancellable`(`decree`=须下诏方能罢/`never`=不可撤/`by_progress`=随进度自然结案，严禁臆造其它值)。各字段取值见「局势立项规则」。
 
@@ -95,6 +97,54 @@ decree new_issue 必填字段：
 **结案**（`close_issues`）：对照 resolve_condition / fail_condition——邸报满足 resolve 或明说「已结案/已平/已罢」→ reason=`resolved`；满足 fail 或明说「已失控/已溃决/彻底失败」→ reason=`failed`。**不论 bar 是否到 100/0**，条件命中就上报；皇帝一道硬旨办死（下令拿人、强令结案）也直接 close。已 close 的局势当{{TURN_UNIT}}不再放 issue_advances。
 
 **撤销**（`cancels`）：奏章说「罢/止/撤/停办」+ 列了沉没成本才转，否则空 list。
+
+## 人事任命规则
+
+**仅当 `decree_text` 明文写「擢/拜/起/迁/补/起用/召 某某 为 某官」时**，在 `appointments` 立一项。邸报叙事里出现「某某接任」「某某到任」**不要**立——那是局势衍生现象，归 narrative。
+
+**两道闸**——任一不过 `approved:false` 且 `reason` 写明拒因：
+
+1. **资历相称**：白身直拜内阁首辅、童生直授尚书、远超合理升阶 → `approved:false`，reason="资历悬殊"。史有其人按其史实资历判；查无此人按诏书自陈/常识推定的资历判（皇帝在诏书里说「某地举人某某」，那就按举人资历判能否拜巡抚）。
+2. **官职合法**：office 写明朝实际官名（巡抚/总督/尚书/侍郎/巡按/兵备道/总兵 等），不能是「军师」「军长」等非明制词。不合 → `approved:false`，reason="非明制官名"。
+
+**不再拦「查无此员」**——杜撰名也允许，只要资历/官职说得通。崇祯本就大量拔擢中下级官员，名册外史实小官与未载史册的杜撰之人，对游戏推演无本质差异（都走中庸默认属性+后续推演）。你可在 `reason` 注明「史有其人」或「名册外，按诏书所述资历准任」，但不据此拒。
+
+当前游戏年月见输入 `turn.year`/`turn.period`（本游戏从 1627.10 崇祯即位开局，年份随回合推进——已到崇祯七年就按 1634 算），用于资历对照参考。
+
+两道闸过 → `approved:true`，落地 = 把此人补入朝臣名册，本回合即可召见。属性走中庸默认（loyalty/ability/integrity/courage≈55-60），后续奏对推演决定表现。
+
+**已在名册者**（含 offstage）：不立 appointments。改任既有官员是 office 调整，目前不入此字段（暂留 narrative）。
+
+字段：
+- `name`：拟任者姓名。
+- `office`：拟授官职（明制官名）。
+- `faction`：派系，取值须从（东林/阉党/皇党/军队/宗室/中立/西学）选，拿不准填「中立」。
+- `reason`：一句话写此人资历与任命依据，或拒因。
+- `approved`：bool。`true` 入册，`false` 拒收。
+
+## 人物状态变更规则
+
+邸报明文写出**既有大臣**的去向（罢黜/下狱/流放/致仕/死亡），立项落入 `character_status_changes`。被罢/下狱/死的人**下回合即不在朝臣册**，无法被召见。
+
+状态白名单：
+- `dismissed`：革职/削籍/罢官夺职/致仕（强制）/勒令归田。邸报「革职拿问」「削籍为民」「罢去某官」「夺职」。
+- `imprisoned`：下诏狱/下三法司狱/系狱待勘。邸报「下诏狱」「锁拿入诏狱」「系狱」「逮赴京师」。
+- `exiled`：流放/发配/谪戍。邸报「发配凤阳司香」「戍辽东」「谪戍某地」。
+- `retired`：致仕（自请）/归养/养老。邸报「致仕归乡」「乞骸骨获准」「以老乞归」。
+- `dead`：赐死/缢死/弃市/斩首/瘐死/卒。邸报「赐自尽」「缢死」「弃市」「斩首」「瘐死狱中」「卒于某地」。
+- `offstage`：暂退舞台不在朝（罕用，多数情形用 dismissed/retired 已足）。
+
+**判据：**
+1. 必须**邸报明文写到此人此事**，叙事衍生猜测不算。
+2. 必须是**既有 active 大臣**（朝臣名册内的人）。新立人物走 `appointments` 不走此字段。
+3. 一人一回合至多一次状态变更（先下狱后赐死分两月走，依邸报为准；同月既下狱又赐死取最终态 `dead`）。
+4. 一锤子事：本字段就是落地槌。不要又写 `metric_delta`/`faction_delta` 又靠 issue 表达——后两者写**清党波及面**（阉党 sat 跌、皇威涨），人物本身的下场归此字段。
+5. **皇帝罢自己亲信也算**——只要邸报明文写到。系统不替皇帝判合理性，extractor 只忠实抄录。
+
+字段：
+- `name`：被处置者姓名（须是既有 active 大臣，可在输入 `active_ministers` 表里核对，但邸报点名为准）。
+- `status`：上述白名单之一。
+- `reason`：一句话写邸报里的处置缘由 / 触发事件，供 db `status_reason` 留痕。
 
 ## 输出 JSON 示例
 
@@ -154,6 +204,19 @@ decree new_issue 必填字段：
   "fiscal_changes": [
     {"key": "商税_base", "delta": 30, "reason": "皇帝诏令开征江南商税"},
     {"key": "田赋_rate", "delta": 5, "reason": "清丈田亩初见成效，实收率提升5%"}
+  ],
+  "appointments": [
+    {"name": "潘汝祯", "office": "浙江巡抚", "faction": "阉党", "reason": "史有其人，原南京太仆寺卿，曾建生祠，授浙江巡抚于史有据", "approved": true},
+    {"name": "陈奇瑜", "office": "陕西巡按", "faction": "中立", "reason": "史有其人，万历四十四年进士，崇祯初任巡按合于资历", "approved": true},
+    {"name": "赵之桢", "office": "登莱兵备道", "faction": "中立", "reason": "名册外，按诏书所述山东进士出身、累官至佥事，授兵备道资历相称", "approved": true},
+    {"name": "某童生", "office": "兵部尚书", "faction": "中立", "reason": "资历悬殊，童生不可直拜尚书", "approved": false},
+    {"name": "李某", "office": "军师", "faction": "中立", "reason": "非明制官名", "approved": false}
+  ],
+  "character_status_changes": [
+    {"name": "魏忠贤", "status": "exiled", "reason": "缴印革司礼监秉笔，发配凤阳祖陵司香"},
+    {"name": "崔呈秀", "status": "dismissed", "reason": "削籍押解原籍，家产抄没"},
+    {"name": "田尔耕", "status": "imprisoned", "reason": "革职拿问，下三法司狱"},
+    {"name": "许显纯", "status": "dead", "reason": "赐自尽于诏狱"}
   ]
 }
 ```

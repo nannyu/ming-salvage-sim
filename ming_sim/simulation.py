@@ -149,6 +149,7 @@ def extract_scores_with_agno(
         for ev in gather_candidate_events(state, db)
     ]
     payload = {
+        "turn": {"year": state.year, "period": state.period, "turn": state.turn},
         "narrative": narrative,
         "decree_text": decree_text,
         "active_issues": issues_brief,

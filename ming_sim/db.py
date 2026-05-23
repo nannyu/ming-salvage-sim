@@ -783,7 +783,7 @@ class GameDB:
                     raise SystemExit(f"--start-ym 格式非法：{start_ym!r}，应为 YYYY.MM（如 1629.04）。")
                 if not (1627 <= y <= 1644 and 1 <= m <= 12):
                     raise SystemExit(f"--start-ym 超范围：{start_ym!r}，年须 1627-1644、月 1-12。")
-                state.turn = (y - 1627) * 12 + (m - 12) + 1
+                state.turn = (y - 1627) * 12 + (m - 10) + 1
                 state.year, state.period = y, m
                 print(f"[调试] 跳到 {y}年{m}月起手（turn={state.turn}）。")
             self.save_state(state)

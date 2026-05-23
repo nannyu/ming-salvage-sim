@@ -78,6 +78,8 @@ def resolve_directives(
     deaths_this_turn: Optional[List[Dict[str, str]]] = None,
     debuts_this_turn: Optional[List[Dict[str, str]]] = None,
     on_event: Optional[Callable[[str, str], None]] = None,
+    content=None,
+    registry=None,
 ) -> str:
     """on_event(kind, data): 推演过程实时回调。
     kind ∈ {stage, thinking, text}；stage 携带阶段名，thinking/text 携带增量片段。
@@ -158,7 +160,7 @@ def resolve_directives(
 
     tlog("结算 4/4 落库 + inertia/ongoing")
     _emit("stage", "落库与事项推进")
-    applied = apply_score_extraction(db, state, extracted)
+    applied = apply_score_extraction(db, state, extracted, content=content, registry=registry)
 
     # 4) 把 narrative 与诏书写入 turn_logs 作下月前文
     db.record_log(state, narrative[:1200])

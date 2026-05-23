@@ -162,7 +162,7 @@ class ExternalPower:
 @dataclass
 class GameState:
     year: int = 1627
-    period: int = 12
+    period: int = 10
     turn: int = 1
     turn_phase: str = "summoning"  # summoning | reviewing | issued —— 见 session.TurnPhase
     metrics: Dict[str, int] = field(
