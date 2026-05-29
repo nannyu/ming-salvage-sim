@@ -2753,7 +2753,10 @@ function GameMenuModal({
 }
 
 function SaveTab() {
-  const [name, setName] = React.useState("");
+  const [name, setName] = React.useState(() => {
+    const now = new Date();
+    return `save_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}_${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}`;
+  });
   const [saves, setSaves] = React.useState<SaveEntry[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState("");
@@ -2786,7 +2789,6 @@ function SaveTab() {
         body: JSON.stringify({ name: name.trim() }),
       });
       setMsg(`已保存为 ${name.trim()}.db`);
-      setName("");
       await refresh();
     } catch (e) {
       const detail = e instanceof ApiRequestError ? e.detail : null;
@@ -2800,15 +2802,15 @@ function SaveTab() {
     <section className="menu-section">
       <h3>保存当前局</h3>
       <p className="menu-hint">将当前 DB 热备到 data/saves/&lt;名字&gt;.db。同名直接覆盖。</p>
+      <input
+        className="menu-input save-name-input"
+        placeholder="存档名（字母/数字/._-）"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        disabled={busy}
+      />
       <div className="menu-row">
-        <input
-          className="menu-input"
-          placeholder="存档名（字母/数字/._-）"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          disabled={busy}
-        />
-        <button className="menu-btn primary" onClick={onSave} disabled={busy}>
+        <button className="menu-btn primary" onClick={onSave} disabled={busy || !name.trim()}>
           {busy ? <Loader2 size={14} className="spin" /> : <Save size={14} />} 保存
         </button>
       </div>
