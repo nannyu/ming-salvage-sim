@@ -4,6 +4,11 @@ WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install
 COPY web/ .
+# Vite 环境变量在构建时注入（通过 Docker build args）
+ARG VITE_SUPABASE_URL=""
+ARG VITE_SUPABASE_ANON_KEY=""
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL
+ENV VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY
 RUN npm run build
 
 # Stage 2: Python backend
