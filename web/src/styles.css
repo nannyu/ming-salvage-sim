@@ -1,3 +1,11 @@
+.menu-input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+}
 :root {
   color-scheme: light;
   font-family:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+import re
 
 
 def is_frozen() -> bool:
@@ -54,3 +55,30 @@ def user_data_path(*parts: str) -> str:
     p = user_data_dir().joinpath(*parts)
     p.parent.mkdir(parents=True, exist_ok=True)
     return str(p)
+
+
+def scoped_user_id(raw_user_id: str) -> str:
+    """把外部 user_id 规整为可安全落盘的目录名。"""
+    raw = (raw_user_id or "").strip().lower()
+    if not raw:
+        return "anonymous"
+    return re.sub(r"[^a-z0-9._-]", "_", raw)
+
+
+def user_scope_dir(user_id: str) -> Path:
+    d = user_data_dir() / "users" / scoped_user_id(user_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def user_scope_path(user_id: str, *parts: str) -> str:
+    p = user_scope_dir(user_id).joinpath(*parts)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+
+def saves_dir_from_db_path(db_path: str) -> str:
+    """与主库同级的 saves/ 目录（多用户隔离自动存档）。"""
+    d = Path(db_path).resolve().parent / "saves"
+    d.mkdir(parents=True, exist_ok=True)
+    return str(d)

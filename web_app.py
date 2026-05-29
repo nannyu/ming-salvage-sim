@@ -8,21 +8,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import queue
 import random
+import shutil
 import threading
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ming_sim.constants import ROOT_DIR
-from ming_sim.paths import bundled_path, user_data_path, user_data_dir
+from ming_sim.paths import bundled_path, user_data_path, user_data_dir, user_scope_path, user_scope_dir
 from ming_sim.exceptions import ExitGame, LLMUnavailable
 from ming_sim.llm_config import (
     load_llm_config,
@@ -40,15 +42,16 @@ from ming_sim.context import match_minister_from_text
 from ming_sim.flows import calc_province_fiscal
 from ming_sim.exceptions import LLMContractError  # noqa: F401  (保留：供错误处理)
 from ming_sim.models import Character, LLMConfig, monthly_amount
+from ming_sim.multi_user import MultiUserService, UserContext
 
 WEB_DIST = bundled_path("web", "dist")
-# 用户上传的自定义立绘存档级目录（不随 build 清空，git 可忽略）。
-# frozen 模式落 ~/.ming_sim/uploads/portraits/，源码模式落 <repo>/data/uploads/portraits/。
-UPLOAD_PORTRAIT_DIR = user_data_path("uploads", "portraits")
 # 自定义立绘 portrait_id 前缀；前端据此解析到 /portraits/custom/<name>.png。
 CUSTOM_PORTRAIT_PREFIX = "custom:"
 ALLOWED_PORTRAIT_TYPES = {"image/png", "image/jpeg", "image/webp"}
 MAX_PORTRAIT_BYTES = 8 * 1024 * 1024  # 8MB 上限
+
+multi_user_service = MultiUserService()
+current_user_ctx: contextvars.ContextVar[Optional[UserContext]] = contextvars.ContextVar("current_user_ctx", default=None)
 
 
 def _delete_sqlite_db_files_or_raise(db_path: str) -> None:
@@ -143,18 +146,20 @@ class DirectivePatch(BaseModel):
     notes: Optional[str] = None
 
 
+class AdminStatusRequest(BaseModel):
+    status: Literal["active", "disabled", "deleted"]
+
+
 class WebGame:
     """Web 端会话包装：持一个 GameSession + 网页专属态（聊天历史、收藏）。"""
 
-    def __init__(self, fresh: bool = False) -> None:
+    def __init__(self, user_id: str, fresh: bool = False) -> None:
         """实例化 = 真正进入游戏。无 API key 直接抛 LLMUnavailable。
         fresh=True：先清空主 DB（新游戏）再建 session。"""
-        db_path = os.environ.get("MING_SIM_DB", "")
-        # 默认存到用户数据目录（frozen=~/.ming_sim/ming_sim.db；源码=<repo>/data/ming_sim.db）。
-        if not db_path:
-            db_path = user_data_path("ming_sim.db")
-        elif not os.path.isabs(db_path):
-            db_path = str(user_data_dir() / db_path)
+        self.user_id = user_id
+        db_path = user_scope_path(self.user_id, "ming_sim.db")
+        self.runtime_llm_path = user_scope_path(self.user_id, "runtime_llm.json")
+        self.portrait_dir = user_scope_path(self.user_id, "uploads", "portraits")
         base_url = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
         model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
         api_key = os.environ.get("OPENAI_API_KEY", "")
@@ -163,7 +168,7 @@ class WebGame:
         advanced_api_key = os.environ.get("OPENAI_ADVANCED_API_KEY", "")
         timeout_seconds = float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "180") or 180)
         # 菜单写的 runtime_llm.json 优先于 env，让"在网页里改的配置"重启后仍生效。
-        runtime = load_runtime_llm()
+        runtime = load_runtime_llm(runtime_path=self.runtime_llm_path)
         base_url = runtime.get("base_url") or base_url
         model = runtime.get("model") or model
         api_key = runtime.get("api_key") or api_key
@@ -206,7 +211,7 @@ class WebGame:
 
     # ── 存档管理 ─────────────────────────────────────────────────────────
     def saves_dir(self) -> str:
-        return user_data_path("saves")
+        return user_scope_path(self.user_id, "saves")
 
     def list_saves(self) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -344,6 +349,7 @@ class WebGame:
             new_config.advanced_model,
             new_config.advanced_base_url,
             new_config.advanced_api_key,
+            runtime_path=self.runtime_llm_path,
         )
         self.session.llm_config = new_config
         # 重建 registry 让大臣 Agent 用新配置
@@ -890,15 +896,161 @@ def sse_event(event: str, data: Dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-web_game: Optional[WebGame] = None  # 懒加载：菜单页点「新游戏/继续/加载存档」才实例化
+web_games: Dict[str, WebGame] = {}
 app = FastAPI(title="Ming Salvage MVP Web")
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # 非 API 与公开认证接口放行
+    if (
+        not path.startswith("/api/")
+        and not path.startswith("/portraits/custom/")
+    ) or path.startswith("/api/auth/") or path == "/api/healthz":
+        return await call_next(request)
+    token_header = request.headers.get("authorization", "")
+    if not token_header.lower().startswith("bearer "):
+        return JSONResponse({"detail": "请先登录。"}, status_code=401)
+    token = token_header.split(" ", 1)[1].strip()
+    try:
+        user = multi_user_service.verify_bearer_token(token)
+    except Exception as exc:
+        return JSONResponse({"detail": f"认证失败：{exc}"}, status_code=401)
+    if user.status == "disabled":
+        return JSONResponse({"detail": "账号已停用，请联系管理员。"}, status_code=403)
+    if user.status == "deleted":
+        return JSONResponse({"detail": "账号已删除。"}, status_code=403)
+    ctx_token = current_user_ctx.set(user)
+    try:
+        return await call_next(request)
+    finally:
+        current_user_ctx.reset(ctx_token)
+
+
+@app.get("/api/healthz")
+async def api_healthz() -> Dict[str, Any]:
+    return {"ok": True, "multi_user_enabled": multi_user_service.enabled()}
+
+
+@app.get("/api/auth/me")
+async def api_auth_me(request: Request) -> Dict[str, Any]:
+    token_header = request.headers.get("authorization", "")
+    if not token_header.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="缺少 Bearer token。")
+    token = token_header.split(" ", 1)[1].strip()
+    try:
+        user = multi_user_service.verify_bearer_token(token)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"认证失败：{exc}") from exc
+    if user.status == "disabled":
+        raise HTTPException(status_code=403, detail="账号已停用，请联系管理员。")
+    if user.status == "deleted":
+        raise HTTPException(status_code=403, detail="账号已删除。")
+    return {
+        "id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "status": user.status,
+    }
+
+
+@app.get("/api/admin/users")
+async def api_admin_users() -> Dict[str, Any]:
+    admin = _require_admin()
+    try:
+        users = multi_user_service.list_profiles()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    enriched: List[Dict[str, Any]] = []
+    for item in users:
+        uid = str(item.get("user_id") or "")
+        progress = {}
+        if uid:
+            try:
+                progress = multi_user_service.get_user_progress_record(uid)
+            except Exception:
+                progress = {}
+        enriched.append({**item, "progress": progress})
+    multi_user_service.add_audit_log(admin.id, "view_users", "all")
+    return {"users": enriched}
+
+
+@app.patch("/api/admin/users/{user_id}/status")
+async def api_admin_update_user_status(user_id: str, request: AdminStatusRequest) -> Dict[str, Any]:
+    admin = _require_admin()
+    if user_id == admin.id and request.status != "active":
+        raise HTTPException(status_code=400, detail="不能停用或删除当前登录的管理员账号。")
+    try:
+        updated = multi_user_service.update_user_status(user_id, request.status)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    multi_user_service.add_audit_log(admin.id, "update_status", user_id, {"status": request.status})
+    if user_id in web_games and request.status != "active":
+        try:
+            web_games[user_id].session.close()
+        except Exception:
+            pass
+        web_games.pop(user_id, None)
+    return {"user": updated}
+
+
+@app.delete("/api/admin/users/{user_id}")
+async def api_admin_delete_user(user_id: str) -> Dict[str, Any]:
+    admin = _require_admin()
+    if user_id == admin.id:
+        raise HTTPException(status_code=400, detail="不能删除当前登录的管理员账号。")
+    try:
+        deleted = multi_user_service.soft_delete_user(user_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    local_dir = str(user_scope_dir(user_id))
+    if os.path.isdir(local_dir):
+        shutil.rmtree(local_dir, ignore_errors=True)
+    if user_id in web_games:
+        try:
+            web_games[user_id].session.close()
+        except Exception:
+            pass
+        web_games.pop(user_id, None)
+    multi_user_service.add_audit_log(admin.id, "delete_user", user_id)
+    return {"user": deleted}
+
+
+@app.get("/api/admin/users/{user_id}/progress")
+async def api_admin_user_progress(user_id: str) -> Dict[str, Any]:
+    admin = _require_admin()
+    progress = multi_user_service.get_user_progress_record(user_id)
+    save_count = len(_scan_saves(user_id))
+    multi_user_service.add_audit_log(admin.id, "view_progress", user_id)
+    return {"progress": progress, "save_count": save_count}
+
+
+def _get_current_user_or_401() -> UserContext:
+    user = current_user_ctx.get()
+    if user is None:
+        raise HTTPException(status_code=401, detail="请先登录。")
+    if user.status == "disabled":
+        raise HTTPException(status_code=403, detail="账号已停用，请联系管理员。")
+    if user.status == "deleted":
+        raise HTTPException(status_code=403, detail="账号已删除。")
+    return user
+
+
+def _require_admin() -> UserContext:
+    user = _get_current_user_or_401()
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="仅管理员可访问。")
+    return user
 
 
 def get_game() -> WebGame:
     """游戏路由统一入口。未开局 → 409 让前端跳回菜单页。"""
-    if web_game is None:
+    user = _get_current_user_or_401()
+    game = web_games.get(user.id)
+    if game is None:
         raise HTTPException(status_code=409, detail="尚未开局，请回菜单选择新游戏/继续/加载存档。")
-    return web_game
+    return game
 
 
 def _save_visible_for_campaign(fname: str, campaign_id: str) -> bool:
@@ -908,10 +1060,8 @@ def _save_visible_for_campaign(fname: str, campaign_id: str) -> bool:
     return bool(campaign_id and fname.startswith(f"{AUTO_SAVE_PREFIX}{campaign_id}_"))
 
 
-def _main_db_campaign_id() -> str:
-    db_path = os.environ.get("MING_SIM_DB", "") or user_data_path("ming_sim.db")
-    if not os.path.isabs(db_path):
-        db_path = str(user_data_dir() / db_path)
+def _main_db_campaign_id(user_id: str) -> str:
+    db_path = user_scope_path(user_id, "ming_sim.db")
     if not os.path.isfile(db_path):
         return ""
     try:
@@ -927,13 +1077,13 @@ def _main_db_campaign_id() -> str:
         return ""
 
 
-def _scan_saves() -> List[Dict[str, Any]]:
+def _scan_saves(user_id: str) -> List[Dict[str, Any]]:
     """扫存档目录，独立于 WebGame 实例（菜单页无 game 也要能列）。"""
-    saves_dir = user_data_path("saves")
+    saves_dir = user_scope_path(user_id, "saves")
     out: List[Dict[str, Any]] = []
     if not os.path.isdir(saves_dir):
         return out
-    campaign_id = _main_db_campaign_id()
+    campaign_id = _main_db_campaign_id(user_id)
     for fname in sorted(os.listdir(saves_dir)):
         if not fname.endswith(".db"):
             continue
@@ -953,24 +1103,24 @@ def _scan_saves() -> List[Dict[str, Any]]:
     return out
 
 
-def _has_main_db() -> bool:
+def _has_main_db(user_id: str) -> bool:
     """主 DB 文件是否存在 → 决定「继续」按钮可不可点。"""
-    db_path = os.environ.get("MING_SIM_DB", "") or user_data_path("ming_sim.db")
-    if not os.path.isabs(db_path):
-        db_path = str(user_data_dir() / db_path)
+    db_path = user_scope_path(user_id, "ming_sim.db")
     return os.path.isfile(db_path)
 
 
 @app.get("/api/menu/status")
 async def api_menu_status() -> Dict[str, Any]:
     """菜单页状态：API key 是否配好、上次主 DB 是否存在、存档列表。"""
-    runtime = load_runtime_llm()
+    user = _get_current_user_or_401()
+    runtime = load_runtime_llm(runtime_path=user_scope_path(user.id, "runtime_llm.json"))
     has_api_key = bool(runtime.get("api_key") or os.environ.get("OPENAI_API_KEY"))
     return {
+        "user": {"id": user.id, "email": user.email, "role": user.role, "status": user.status},
         "has_api_key": has_api_key,
-        "has_running_game": web_game is not None,
-        "has_main_db": _has_main_db(),
-        "saves": _scan_saves(),
+        "has_running_game": user.id in web_games,
+        "has_main_db": _has_main_db(user.id),
+        "saves": _scan_saves(user.id),
         "llm": {
             "base_url": runtime.get("base_url") or os.environ.get("OPENAI_BASE_URL", ""),
             "model": runtime.get("model") or os.environ.get("OPENAI_MODEL", ""),
@@ -986,55 +1136,60 @@ async def api_menu_status() -> Dict[str, Any]:
 @app.post("/api/menu/new_game")
 async def api_menu_new_game() -> Dict[str, Any]:
     """开始新游戏：清主 DB → 新建 WebGame。"""
-    global web_game
-    if web_game is not None:
+    user = _get_current_user_or_401()
+    current = web_games.get(user.id)
+    if current is not None:
         try:
-            web_game.session.close()
+            current.session.close()
         except Exception:
             pass
-        web_game = None
+        web_games.pop(user.id, None)
     try:
-        web_game = WebGame(fresh=True)
+        game = WebGame(user_id=user.id, fresh=True)
+        web_games[user.id] = game
     except LLMUnavailable as exc:
         raise HTTPException(status_code=412, detail=_llm_error_detail(exc))
-    return {"state": web_game.state_payload()}
+    return {"state": game.state_payload()}
 
 
 @app.post("/api/menu/continue")
 async def api_menu_continue() -> Dict[str, Any]:
     """继续：用上次主 DB 启动 WebGame。"""
-    global web_game
-    if not _has_main_db():
+    user = _get_current_user_or_401()
+    if not _has_main_db(user.id):
         raise HTTPException(status_code=404, detail="无上次进度可继续，请先新游戏或加载存档。")
     try:
-        web_game = WebGame(fresh=False)
+        game = WebGame(user_id=user.id, fresh=False)
+        web_games[user.id] = game
     except LLMUnavailable as exc:
         raise HTTPException(status_code=412, detail=_llm_error_detail(exc))
-    return {"state": web_game.state_payload()}
+    return {"state": game.state_payload()}
 
 
 @app.post("/api/menu/load_save/{name}")
 async def api_menu_load_save(name: str) -> Dict[str, Any]:
     """从存档启动：先启动空 WebGame（fresh）→ 调 load_save 热替换主 DB。"""
-    global web_game
+    user = _get_current_user_or_401()
     try:
-        web_game = WebGame(fresh=False)  # 先有 session 才能 load_save
+        game = WebGame(user_id=user.id, fresh=False)  # 先有 session 才能 load_save
+        web_games[user.id] = game
     except LLMUnavailable as exc:
         raise HTTPException(status_code=412, detail=_llm_error_detail(exc))
-    web_game.load_save(name)
-    return {"state": web_game.state_payload()}
+    game.load_save(name)
+    return {"state": game.state_payload()}
 
 
 @app.post("/api/menu/exit_to_menu")
 async def api_menu_exit() -> Dict[str, Any]:
     """退回菜单：关 session 但不删 DB。"""
-    global web_game
-    if web_game is not None:
+    user = _get_current_user_or_401()
+    current = web_games.get(user.id)
+    if current is not None:
         try:
-            web_game.session.close()
+            current.session.close()
         except Exception:
             pass
-        web_game = None
+        web_games.pop(user.id, None)
     return {"ok": True}
 
 
@@ -1044,13 +1199,14 @@ async def api_menu_shutdown() -> Dict[str, Any]:
     import os as _os
     import signal as _signal
     import threading as _threading
-    global web_game
-    if web_game is not None:
+    user = _get_current_user_or_401()
+    current = web_games.get(user.id)
+    if current is not None:
         try:
-            web_game.session.close()
+            current.session.close()
         except Exception:
             pass
-        web_game = None
+        web_games.pop(user.id, None)
     # 先返回响应，再异步终止进程。SIGTERM 在 *nix 走优雅退出；
     # Windows 无完整 SIGTERM 语义（pywebview 主线程也不收信号），直接 os._exit 兜底。
     def _kill_later() -> None:
@@ -1079,6 +1235,8 @@ class LlmSetupRequest(BaseModel):
 @app.post("/api/menu/llm")
 async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
     """菜单页保存 LLM 配置：先发起轻量聊天校验，通过后才落盘。"""
+    user = _get_current_user_or_401()
+    runtime_path = user_scope_path(user.id, "runtime_llm.json")
     base_url = (request.base_url or "").strip()
     model = (request.model or "").strip()
     api_key = (request.api_key or "").strip()
@@ -1091,13 +1249,13 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
     if not (base_url and model):
         raise HTTPException(status_code=400, detail="base_url / model 不能为空。")
     if not api_key:
-        existing = load_runtime_llm()
+        existing = load_runtime_llm(runtime_path=runtime_path)
         api_key = existing.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise HTTPException(status_code=400, detail="api_key 未配置，请填写。")
     # advanced_api_key 留空：复用已存的（避免覆盖成空）。
     if advanced_model and not advanced_api_key:
-        existing = load_runtime_llm()
+        existing = load_runtime_llm(runtime_path=runtime_path)
         advanced_api_key = existing.get("advanced_api_key") or os.environ.get("OPENAI_ADVANCED_API_KEY", "")
     normalized_base_url = normalize_openai_base_url(base_url)
     config = LLMConfig(
@@ -1127,6 +1285,7 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
         advanced_model,
         advanced_base_url,
         advanced_api_key,
+        runtime_path=runtime_path,
     )
     return {
         "ok": True,
@@ -1152,7 +1311,18 @@ app.add_middleware(
 
 @app.get("/api/game/state")
 async def api_state() -> Dict[str, Any]:
-    return get_game().state_payload()
+    user = _get_current_user_or_401()
+    game = get_game()
+    payload = game.state_payload()
+    try:
+        multi_user_service.save_progress_record(
+            user_id=user.id,
+            state_payload=payload,
+            save_count=len(game.list_saves()),
+        )
+    except Exception:
+        pass
+    return payload
 
 
 @app.get("/api/secret_orders")
@@ -1388,19 +1558,20 @@ async def api_issue_decree_stream() -> StreamingResponse:
     async generator 从 Queue 拉事件转成 SSE。
     """
     ev_queue: "queue.Queue[tuple[str, Any]]" = queue.Queue()
+    game = get_game()
 
     def on_event(kind: str, data: str) -> None:
         ev_queue.put((kind, data))
 
     def worker() -> None:
         try:
-            report = get_game().session.resolve_turn(on_event=on_event)
-            decree = get_game().session.last_decree
-            get_game().refresh_turn()
+            report = game.session.resolve_turn(on_event=on_event)
+            decree = game.session.last_decree
+            game.refresh_turn()
             ev_queue.put(("__done__", {
                 "decree": decree,
                 "report": report,
-                "state": get_game().state_payload(),
+                "state": game.state_payload(),
             }))
         except ValueError as e:
             ev_queue.put(("__error__", str(e)))
@@ -1505,8 +1676,9 @@ async def api_reset_game() -> Dict[str, Any]:
 @app.get("/api/llm/config")
 async def api_get_llm_config() -> Dict[str, Any]:
     """读当前生效的 LLM 配置。api_key 不回传明文，只回是否已设置。"""
+    user = _get_current_user_or_401()
     cfg = get_game().session.llm_config
-    saved = load_runtime_llm()
+    saved = load_runtime_llm(runtime_path=user_scope_path(user.id, "runtime_llm.json"))
     return {
         "base_url": cfg.base_url,
         "model": cfg.model,
@@ -1566,10 +1738,10 @@ async def api_set_llm_config(request: LLMConfigRequest) -> Dict[str, Any]:
 _PORTRAIT_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 
 
-def _find_portrait_file(name: str) -> Optional[str]:
+def _find_portrait_file(portrait_dir: str, name: str) -> Optional[str]:
     """找该人物已存在的自定义立绘文件（任一扩展名），无则 None。"""
     for ext in _PORTRAIT_EXT.values():
-        path = os.path.join(UPLOAD_PORTRAIT_DIR, f"{name}.{ext}")
+        path = os.path.join(portrait_dir, f"{name}.{ext}")
         if os.path.exists(path):
             return path
     return None
@@ -1589,12 +1761,13 @@ async def api_upload_portrait(name: str, file: UploadFile = File(...)) -> Dict[s
         raise HTTPException(status_code=400, detail="文件为空")
     if len(data) > MAX_PORTRAIT_BYTES:
         raise HTTPException(status_code=400, detail="图片过大（上限 8MB）")
-    os.makedirs(UPLOAD_PORTRAIT_DIR, exist_ok=True)
+    portrait_dir = get_game().portrait_dir
+    os.makedirs(portrait_dir, exist_ok=True)
     # 先清掉该人物的旧图（可能扩展名不同），再写新图。
-    old = _find_portrait_file(name)
+    old = _find_portrait_file(portrait_dir, name)
     if old is not None:
         os.remove(old)
-    with open(os.path.join(UPLOAD_PORTRAIT_DIR, f"{name}.{ext}"), "wb") as fh:
+    with open(os.path.join(portrait_dir, f"{name}.{ext}"), "wb") as fh:
         fh.write(data)
     get_game().set_custom_portrait(name, f"{CUSTOM_PORTRAIT_PREFIX}{name}")
     return {"name": name, "portrait_id": f"{CUSTOM_PORTRAIT_PREFIX}{name}"}
@@ -1605,7 +1778,7 @@ async def api_delete_portrait(name: str) -> Dict[str, Any]:
     character = get_game().find_character(name)
     if character is None:
         raise HTTPException(status_code=404, detail="未找到该人物")
-    old = _find_portrait_file(name)
+    old = _find_portrait_file(get_game().portrait_dir, name)
     if old is not None:
         os.remove(old)
     # 复位 portrait_id：清空 → 前端回落到池图（add/seed 时会按 office_type 再分配）。
@@ -1627,7 +1800,7 @@ async def api_set_court_layout(body: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.get("/portraits/custom/{name}")
 async def api_get_portrait(name: str):
-    path = _find_portrait_file(name)
+    path = _find_portrait_file(get_game().portrait_dir, name)
     if path is None:
         raise HTTPException(status_code=404, detail="无自定义立绘")
     return FileResponse(path)

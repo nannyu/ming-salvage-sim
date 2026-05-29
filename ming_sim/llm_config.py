@@ -10,7 +10,12 @@ from typing import Dict, Optional
 from ming_sim.models import LLMConfig
 from ming_sim.paths import user_data_path
 
-RUNTIME_LLM_PATH = user_data_path("runtime_llm.json")
+
+def runtime_llm_path() -> str:
+    custom = (os.environ.get("MING_SIM_RUNTIME_LLM_PATH", "") or "").strip()
+    if custom:
+        return custom
+    return user_data_path("runtime_llm.json")
 
 
 def normalize_openai_base_url(base_url: str) -> str:
@@ -92,12 +97,13 @@ def for_role(cfg: LLMConfig, role: str) -> LLMConfig:
     return cfg
 
 
-def load_runtime_llm() -> Dict[str, str]:
+def load_runtime_llm(runtime_path: str = "") -> Dict[str, str]:
     """读 data/runtime_llm.json。缺/坏返回空 dict。"""
-    if not os.path.isfile(RUNTIME_LLM_PATH):
+    runtime_path = runtime_path or runtime_llm_path()
+    if not os.path.isfile(runtime_path):
         return {}
     try:
-        with open(RUNTIME_LLM_PATH, "r", encoding="utf-8") as fh:
+        with open(runtime_path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, json.JSONDecodeError):
         return {}
@@ -123,9 +129,11 @@ def save_runtime_llm(
     advanced_model: str = "",
     advanced_base_url: str = "",
     advanced_api_key: str = "",
+    runtime_path: str = "",
 ) -> None:
     """写 data/runtime_llm.json。明文存盘——按用户选择。"""
-    os.makedirs(os.path.dirname(RUNTIME_LLM_PATH), exist_ok=True)
+    runtime_path = runtime_path or runtime_llm_path()
+    os.makedirs(os.path.dirname(runtime_path), exist_ok=True)
     payload = {
         "base_url": (base_url or "").strip(),
         "model": (model or "").strip(),
@@ -136,5 +144,5 @@ def save_runtime_llm(
         "advanced_base_url": (advanced_base_url or "").strip(),
         "advanced_api_key": (advanced_api_key or "").strip(),
     }
-    with open(RUNTIME_LLM_PATH, "w", encoding="utf-8") as fh:
+    with open(runtime_path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)

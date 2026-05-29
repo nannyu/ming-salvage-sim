@@ -24,6 +24,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
 import "./styles.css";
 
 type Metrics = Record<string, number>;
@@ -278,7 +279,24 @@ type SecretOrder = {
   turn_closed: number | null;
 };
 
+type AdminUserRow = {
+  user_id: string;
+  email: string;
+  role: string;
+  status: string;
+  progress?: {
+    year?: number;
+    period?: number;
+    turn?: number;
+    treasury?: string;
+    save_count?: number;
+    metrics?: Record<string, number>;
+    updated_at?: string;
+  };
+};
+
 type ProposedDirective = { id: number; text: string; status: string; notes: string };
+
 type ChatResponse = {
   answer: string;
   history: ChatMessage[];
@@ -296,6 +314,13 @@ type ApiErrorDetail = {
   message?: string;
   provider_message?: string;
   status_code?: number | null;
+};
+
+type CurrentUser = {
+  id: string;
+  email: string;
+  role: "admin" | "user";
+  status: "active" | "disabled" | "deleted";
 };
 
 class ApiRequestError extends Error {
@@ -327,9 +352,24 @@ const formatApiError = (error: any, fallback: string) => {
   return detail.code ? `[${detail.code}] ${detail.message || fallback}` : detail.message || fallback;
 };
 
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+let authToken = "";
+const setAuthToken = (token: string) => {
+  authToken = token;
+};
+const authHeaders = (headers: Record<string, string> = {}) =>
+  authToken ? { ...headers, Authorization: `Bearer ${authToken}` } : headers;
+
 const api = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+  const headers: Record<string, string> = { "Content-Type": "application/json", ...(options?.headers as Record<string, string> || {}) };
+  if (authToken) {
+    headers.Authorization = `Bearer ${authToken}`;
+  }
   const response = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(options?.headers || {}) },
+    headers,
     ...options,
   });
   if (!response.ok) {
@@ -361,7 +401,10 @@ const streamChat = async (
 ): Promise<ChatResponse> => {
   const response = await fetch(`/api/ministers/${encodeURIComponent(ministerName)}/chat/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     body: JSON.stringify({ message }),
   });
   if (!response.ok) {
@@ -508,6 +551,7 @@ const getMapIntelStyle = (node: MapNode): React.CSSProperties => {
 type AppView = "menu" | "game";
 
 type MenuStatus = {
+  user: CurrentUser;
   has_api_key: boolean;
   has_running_game: boolean;
   has_main_db: boolean;
@@ -525,6 +569,11 @@ type MenuStatus = {
 };
 
 function App() {
+  const [currentUser, setCurrentUser] = React.useState<CurrentUser | null>(null);
+  const [authBusy, setAuthBusy] = React.useState(false);
+  const [authMode, setAuthMode] = React.useState<"signin" | "signup">("signin");
+  const [authEmail, setAuthEmail] = React.useState("");
+  const [authPassword, setAuthPassword] = React.useState("");
   const [appView, setAppView] = React.useState<AppView>("menu");
   const [menuStatus, setMenuStatus] = React.useState<MenuStatus | null>(null);
   const [state, setState] = React.useState<GameState | null>(null);
@@ -588,6 +637,7 @@ function App() {
     form.append("file", file);
     const resp = await fetch(`/api/consorts/${encodeURIComponent(ministerName)}/portrait`, {
       method: "POST",
+      headers: authHeaders(),
       body: form,
     });
     if (!resp.ok) {
@@ -600,19 +650,80 @@ function App() {
   const refreshMenuStatus = React.useCallback(async () => {
     const s = await api<MenuStatus>("/api/menu/status");
     setMenuStatus(s);
+    setCurrentUser(s.user);
     return s;
   }, []);
 
   React.useEffect(() => {
-    refreshMenuStatus()
-      .then((s) => {
+    (async () => {
+      setAuthBusy(true);
+      try {
+        const { data } = await supabase.auth.getSession();
+        const token = data.session?.access_token || "";
+        setAuthToken(token);
+        if (!token) {
+          setCurrentUser(null);
+          return;
+        }
+        const s = await refreshMenuStatus();
         if (s.has_running_game) {
           setAppView("game");
-          loadState().catch((err) => setError(err.message));
+          await loadState();
         }
-      })
-      .catch((err) => setError(err.message));
+      } catch (err: any) {
+        setError(err?.message || String(err));
+      } finally {
+        setAuthBusy(false);
+      }
+    })();
   }, [refreshMenuStatus, loadState]);
+
+  const signInOrUp = React.useCallback(async () => {
+    setError("");
+    setAuthBusy(true);
+    try {
+      if (!supabaseUrl || !supabaseAnonKey) {
+        throw new Error("前端缺少 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY。");
+      }
+      if (authMode === "signup") {
+        const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+          email: authEmail.trim(),
+          password: authPassword,
+        });
+        if (signUpErr) throw signUpErr;
+        const signupToken = signUpData.session?.access_token || "";
+        if (signupToken) {
+          setAuthToken(signupToken);
+          await refreshMenuStatus();
+          return;
+        }
+        throw new Error("注册成功。若项目开启了邮箱验证，请先到邮箱点确认链接后再登录。");
+      }
+      const { data, error: signInErr } = await supabase.auth.signInWithPassword({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signInErr) throw signInErr;
+      const token = data.session?.access_token || "";
+      if (!token) {
+        throw new Error("登录失败：未获得会话 token。");
+      }
+      setAuthToken(token);
+      await refreshMenuStatus();
+    } catch (err: any) {
+      setError(err?.message || String(err));
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [authEmail, authMode, authPassword, refreshMenuStatus]);
+
+  const signOut = React.useCallback(async () => {
+    await supabase.auth.signOut();
+    setAuthToken("");
+    setCurrentUser(null);
+    setState(null);
+    setAppView("menu");
+  }, []);
 
   const enterGameAfterMenu = React.useCallback(async () => {
     setAppView("game");
@@ -620,7 +731,7 @@ function App() {
   }, [loadState]);
 
   const exitToMenu = React.useCallback(async () => {
-    await fetch("/api/menu/exit_to_menu", { method: "POST" });
+    await fetch("/api/menu/exit_to_menu", { method: "POST", headers: authHeaders() });
     setState(null);
     setAppView("menu");
     await refreshMenuStatus();
@@ -705,12 +816,49 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [activeModal, drawerOpen, haremDrawerOpen, mapIntelOpen]);
 
+  if (!currentUser) {
+    return (
+      <div className="menu-screen">
+        <div className="menu-panel">
+          <h1 className="menu-title">明末力挽狂澜</h1>
+          <p className="menu-subtitle">请先登录后进入你的独立存档</p>
+          {error ? <div className="menu-error">{error}</div> : null}
+          <div className="menu-buttons" style={{ gap: 8 }}>
+            <input
+              className="menu-input"
+              placeholder="邮箱"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              disabled={authBusy}
+            />
+            <input
+              className="menu-input"
+              placeholder="密码（至少 6 位）"
+              type="password"
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              disabled={authBusy}
+            />
+            <button className="menu-btn primary" onClick={signInOrUp} disabled={authBusy || !authEmail.trim() || authPassword.length < 6}>
+              {authBusy ? "处理中..." : authMode === "signin" ? "登录" : "注册并登录"}
+            </button>
+            <button className="menu-btn" onClick={() => setAuthMode((m) => (m === "signin" ? "signup" : "signin"))} disabled={authBusy}>
+              {authMode === "signin" ? "没有账号？去注册" : "已有账号？去登录"}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (appView === "menu") {
     return (
       <MenuPage
+        user={currentUser}
         status={menuStatus}
         onRefresh={refreshMenuStatus}
         onEnterGame={enterGameAfterMenu}
+        onSignOut={signOut}
         error={error}
         setError={setError}
       />
@@ -952,7 +1100,7 @@ function App() {
     setSettleNarrative("");
     setError("");
     try {
-      const response = await fetch("/api/decree/issue/stream", { method: "POST" });
+      const response = await fetch("/api/decree/issue/stream", { method: "POST", headers: authHeaders() });
       if (!response.ok || !response.body) {
         throw new Error(`颁诏失败：HTTP ${response.status}`);
       }
@@ -1309,7 +1457,7 @@ function defaultCourtPct(index: number, total: number): { px: number; py: number
 // 坐标存百分比（0-1），持久化到服务端 db（按存档隔离）
 async function loadCourtPos(): Promise<Record<string, { px: number; py: number }>> {
   try {
-    const r = await fetch("/api/court_layout");
+    const r = await fetch("/api/court_layout", { headers: authHeaders() });
     if (!r.ok) return {};
     const d = await r.json();
     return JSON.parse(d.layout || "{}");
@@ -1318,7 +1466,7 @@ async function loadCourtPos(): Promise<Record<string, { px: number; py: number }
 function saveCourtPos(pos: Record<string, { px: number; py: number }>) {
   fetch("/api/court_layout", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ layout: JSON.stringify(pos) }),
   }).catch(() => {});
 }
@@ -2184,7 +2332,7 @@ function ExtractionModal({ onClose }: { onClose: () => void }) {
     let alive = true;
     (async () => {
       try {
-        const resp = await fetch("/api/turn_extraction");
+        const resp = await fetch("/api/turn_extraction", { headers: authHeaders() });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (alive) setExtraction(data);
@@ -2256,7 +2404,7 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
     let alive = true;
     (async () => {
       try {
-        const resp = await fetch("/api/history/turns");
+        const resp = await fetch("/api/history/turns", { headers: authHeaders() });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (!alive) return;
@@ -2279,7 +2427,7 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
     setDetailError("");
     (async () => {
       try {
-        const resp = await fetch(`/api/history/turn/${selectedTurn}`);
+        const resp = await fetch(`/api/history/turn/${selectedTurn}`, { headers: authHeaders() });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         const data = await resp.json();
         if (alive) setDetail(data);
@@ -2590,7 +2738,7 @@ function ShutdownTab() {
     setBusy(true);
     setErr("");
     try {
-      await fetch("/api/menu/shutdown", { method: "POST" });
+      await fetch("/api/menu/shutdown", { method: "POST", headers: authHeaders() });
       // server 已发 SIGTERM 给自己；前端尝试关页面（浏览器可能拦截），否则提示用户。
       setTimeout(() => {
         try { window.close(); } catch { /* noop */ }
@@ -3962,21 +4110,27 @@ function Info({ label, value, tone }: { label: string; value: React.ReactNode; t
 }
 
 function MenuPage({
+  user,
   status,
   onRefresh,
   onEnterGame,
+  onSignOut,
   error,
   setError,
 }: {
+  user: CurrentUser;
   status: MenuStatus | null;
   onRefresh: () => Promise<MenuStatus>;
   onEnterGame: () => Promise<void>;
+  onSignOut: () => Promise<void>;
   error: string;
   setError: (msg: string) => void;
 }) {
   const [busy, setBusy] = React.useState<string>("");
   const [showApiForm, setShowApiForm] = React.useState(false);
   const [showSaveList, setShowSaveList] = React.useState(false);
+  const [adminUsers, setAdminUsers] = React.useState<AdminUserRow[]>([]);
+  const [showAdmin, setShowAdmin] = React.useState(false);
 
   const guard = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
@@ -4012,12 +4166,19 @@ function MenuPage({
   const hasKey = !!status?.has_api_key;
   const hasMainDb = !!status?.has_main_db;
   const saves = status?.saves || [];
+  const refreshAdminUsers = async () => {
+    const data = await api<{ users: AdminUserRow[] }>("/api/admin/users");
+    setAdminUsers(data.users || []);
+  };
 
   return (
     <div className="menu-screen">
       <div className="menu-panel">
         <h1 className="menu-title">明末力挽狂澜</h1>
         <p className="menu-subtitle">崇祯元年正月 · 召大臣议天下事</p>
+        <div className="menu-llm-info">
+          当前用户：{user.email}（{user.role}）
+        </div>
 
         {!hasKey && (
           <div className="menu-notice">尚未配置 API 接口。请先「设置 API」。</div>
@@ -4036,6 +4197,14 @@ function MenuPage({
           </button>
           <button className="menu-btn" disabled={!!busy} onClick={() => setShowApiForm(true)}>
             设置 API {hasKey ? "" : "（必需）"}
+          </button>
+          {user.role === "admin" && (
+            <button className="menu-btn" disabled={!!busy} onClick={() => { setShowAdmin(true); refreshAdminUsers().catch((err) => setError(err.message)); }}>
+              管理用户
+            </button>
+          )}
+          <button className="menu-btn" disabled={!!busy} onClick={() => onSignOut().catch((err) => setError(err.message))}>
+            退出登录
           </button>
         </div>
 
@@ -4066,6 +4235,14 @@ function MenuPage({
             setShowSaveList(false);
             await onLoadSave(name);
           }}
+        />
+      )}
+      {showAdmin && (
+        <AdminUsersModal
+          users={adminUsers}
+          currentUserId={user.id}
+          onClose={() => setShowAdmin(false)}
+          onRefresh={() => refreshAdminUsers()}
         />
       )}
     </div>
@@ -4107,7 +4284,7 @@ function ApiSettingsModal({
     try {
       const response = await fetch("/api/menu/llm", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           base_url: baseUrl.trim(),
           model: model.trim(),
@@ -4208,6 +4385,114 @@ function SaveListModal({
         </ul>
         <div className="menu-modal-actions">
           <button onClick={onClose}>关闭</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminUsersModal({
+  users,
+  currentUserId,
+  onClose,
+  onRefresh,
+}: {
+  users: AdminUserRow[];
+  currentUserId: string;
+  onClose: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [busyId, setBusyId] = React.useState("");
+  const [err, setErr] = React.useState("");
+  const [detailUserId, setDetailUserId] = React.useState("");
+  const [detail, setDetail] = React.useState<{ progress: AdminUserRow["progress"]; save_count: number } | null>(null);
+  const changeStatus = async (userId: string, status: "active" | "disabled") => {
+    if (userId === currentUserId && status !== "active") {
+      setErr("不能停用当前登录的管理员账号。");
+      return;
+    }
+    setBusyId(`${userId}:${status}`);
+    setErr("");
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      await onRefresh();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusyId("");
+    }
+  };
+  const deleteUser = async (userId: string) => {
+    if (userId === currentUserId) {
+      setErr("不能删除当前登录的管理员账号。");
+      return;
+    }
+    if (!window.confirm("删除用户会清理其本地存档，是否继续？")) return;
+    setBusyId(`${userId}:delete`);
+    setErr("");
+    try {
+      await api(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+      await onRefresh();
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusyId("");
+    }
+  };
+  const loadDetail = async (userId: string) => {
+    setBusyId(`${userId}:detail`);
+    setErr("");
+    try {
+      const data = await api<{ progress: AdminUserRow["progress"]; save_count: number }>(
+        `/api/admin/users/${encodeURIComponent(userId)}/progress`,
+      );
+      setDetailUserId(userId);
+      setDetail(data);
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusyId("");
+    }
+  };
+  return (
+    <div className="menu-modal-bg" onClick={onClose}>
+      <div className="menu-modal" onClick={(e) => e.stopPropagation()}>
+        <h2>用户管理</h2>
+        {err ? <div className="menu-error">{err}</div> : null}
+        <ul className="menu-save-list">
+          {users.map((u) => (
+            <li key={u.user_id}>
+              <div style={{ display: "flex", width: "100%", justifyContent: "space-between", gap: 8 }}>
+                <div>
+                  <div className="save-name">{u.email || u.user_id}</div>
+                  <div className="save-meta">
+                    role={u.role || "user"} · status={u.status || "active"} · turn={u.progress?.turn || 0}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button disabled={!!busyId} onClick={() => loadDetail(u.user_id)}>详情</button>
+                  <button disabled={!!busyId || u.user_id === currentUserId} onClick={() => changeStatus(u.user_id, "active")}>启用</button>
+                  <button disabled={!!busyId || u.user_id === currentUserId} onClick={() => changeStatus(u.user_id, "disabled")}>停用</button>
+                  <button className="danger" disabled={!!busyId || u.user_id === currentUserId} onClick={() => deleteUser(u.user_id)}>删除</button>
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+        {detailUserId && detail ? (
+          <div className="menu-hint" style={{ marginTop: 12, textAlign: "left" }}>
+            <strong>进度详情 · {detailUserId}</strong>
+            <div>回合：{detail.progress?.year || 0}年{detail.progress?.period || 0}月 · turn {detail.progress?.turn || 0}</div>
+            <div>存档数：{detail.save_count}</div>
+            <div>钱粮摘要：{detail.progress?.treasury || "暂无"}</div>
+            <div>更新时间：{detail.progress?.updated_at || "—"}</div>
+          </div>
+        ) : null}
+        <div className="menu-modal-actions">
+          <button onClick={onClose} disabled={!!busyId}>关闭</button>
         </div>
       </div>
     </div>

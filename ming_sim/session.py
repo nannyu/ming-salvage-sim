@@ -27,7 +27,7 @@ from ming_sim.decree import advance_without_edict, resolve_directives, write_dec
 from ming_sim.issues import bind_content as _bind_issues
 from ming_sim.llm_model import create_agno_db, extract_agent_text, verify_llm_available
 from ming_sim.models import Character, CourtContext, GameState, LLMConfig
-from ming_sim.paths import user_data_path
+from ming_sim.paths import saves_dir_from_db_path
 from ming_sim.registry import MinisterRegistry, bind_content as _bind_registry
 from ming_sim.skills import bind_content as _bind_skills
 
@@ -362,6 +362,7 @@ class GameSession:
         self.content = content if content is not None else GameContent.load()
         _bind_all_content(self.content)
         self.llm_config = llm_config
+        self.db_path = db_path
         if verify_llm:
             verify_llm_available(llm_config)
         self.db = GameDB(db_path, content=self.content)
@@ -840,8 +841,7 @@ class GameSession:
         不碰用户手动存档。失败静默（自动存档不应阻断游戏）。"""
         try:
             import os as _os
-            saves_dir = user_data_path("saves", "_keep")  # 确保父目录建好
-            saves_dir = _os.path.dirname(saves_dir)
+            saves_dir = saves_dir_from_db_path(self.db_path)
             campaign_id = (self.db.kv_get("campaign_id") or "").strip()
             if not campaign_id:
                 campaign_id = uuid.uuid4().hex[:12]
