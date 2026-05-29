@@ -587,69 +587,65 @@ const LLM_PROVIDER_PRESETS: LLMProviderPreset[] = [
     base_url: "https://api.deepseek.com",
     models: ["deepseek-chat", "deepseek-reasoner"],
     advanced_models: ["deepseek-reasoner"],
-    note: "国产首选，中文好、价格低",
   },
   {
     name: "OpenAI",
     base_url: "https://api.openai.com/v1",
     models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini"],
     advanced_models: ["gpt-4.1", "o3-mini"],
-    note: "需海外网络或代理",
   },
   {
     name: "Google Gemini",
     base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
     advanced_models: ["gemini-2.5-pro"],
-    note: "需海外网络；兼容 OpenAI 格式",
   },
   {
-    name: "Kimi (月之暗面)",
+    name: "Kimi",
     base_url: "https://api.moonshot.cn/v1",
     models: ["moonshot-v1-auto", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
     advanced_models: ["moonshot-v1-128k"],
-    note: "国产，长上下文",
   },
   {
     name: "智谱 BigModel",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
     models: ["glm-4-flash", "glm-4-plus", "glm-4-long"],
     advanced_models: ["glm-4-plus"],
-    note: "国产，免费额度充足",
   },
   {
     name: "OpenRouter",
     base_url: "https://openrouter.ai/api/v1",
     models: ["deepseek/deepseek-chat", "openai/gpt-4o-mini", "google/gemini-2.5-flash", "anthropic/claude-sonnet-4"],
     advanced_models: ["openai/gpt-4.1", "anthropic/claude-sonnet-4"],
-    note: "聚合网关，一个 key 用多家模型",
   },
   {
     name: "小米 MiMo",
     base_url: "https://api.mimo.xiaomi.com/v1",
     models: ["MiMo-GPT2-Medium"],
-    note: "小米大模型",
   },
   {
-    name: "阿里 通义千问",
+    name: "通义千问",
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     models: ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
     advanced_models: ["qwen-max"],
-    note: "国产，兼容 OpenAI 格式",
   },
   {
-    name: "硅基流动 SiliconFlow",
+    name: "硅基流动",
     base_url: "https://api.siliconflow.cn/v1",
     models: ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct"],
     advanced_models: ["deepseek-ai/DeepSeek-R1"],
-    note: "国产聚合，免费额度",
+  },
+  {
+    name: "自定义",
+    base_url: "",
+    models: [],
   },
 ];
 
 function ProviderSelect({ onSelect }: { onSelect: (preset: LLMProviderPreset) => void }) {
   return (
     <div className="menu-field provider-select">
-      <span>快速选择服务商</span>
+      <span>选择服务商</span>
       <select
         className="menu-input"
         defaultValue=""
@@ -661,9 +657,9 @@ function ProviderSelect({ onSelect }: { onSelect: (preset: LLMProviderPreset) =>
           e.target.value = "";
         }}
       >
-        <option value="" disabled>— 选择预设服务商 —</option>
+        <option value="" disabled>— 选择服务商 —</option>
         {LLM_PROVIDER_PRESETS.map((p, i) => (
-          <option key={p.name} value={i}>{p.name}{p.note ? ` (${p.note})` : ""}</option>
+          <option key={p.name} value={i}>{p.name}</option>
         ))}
       </select>
     </div>
@@ -673,18 +669,21 @@ function ProviderSelect({ onSelect }: { onSelect: (preset: LLMProviderPreset) =>
 function ModelFetcher({
   baseUrl,
   apiKey,
+  value,
+  onChange,
   onSelect,
   className,
 }: {
   baseUrl: string;
   apiKey: string;
+  value: string;
+  onChange: (v: string) => void;
   onSelect: (model: string) => void;
   className?: string;
 }) {
   const [models, setModels] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState("");
-  const [open, setOpen] = React.useState(false);
 
   const fetchModels = async () => {
     if (!baseUrl.trim()) {
@@ -693,8 +692,6 @@ function ModelFetcher({
     }
     setLoading(true);
     setErr("");
-    setModels([]);
-    setOpen(false);
     try {
       const data = await api<{ models: string[] }>("/api/llm/models", {
         method: "POST",
@@ -704,7 +701,6 @@ function ModelFetcher({
         setErr("该 API 未返回可用模型列表。");
       } else {
         setModels(data.models);
-        setOpen(true);
       }
     } catch (e: any) {
       setErr(e?.message || String(e));
@@ -715,34 +711,44 @@ function ModelFetcher({
 
   return (
     <div className={`model-fetcher ${className || ""}`}>
-      <button
-        type="button"
-        className="menu-btn"
-        onClick={fetchModels}
-        disabled={loading}
-        title="从 API 拉取可用模型列表"
-      >
-        {loading ? <Loader2 size={13} className="spin" /> : <Settings size={13} />}
-        {loading ? " 拉取中..." : " 拉取模型列表"}
-      </button>
-      {err && <small className="model-fetcher-err">{err}</small>}
-      {open && models.length > 0 && (
+      <div className="model-fetcher-row">
         <select
-          className="menu-input model-fetcher-select"
-          defaultValue=""
+          className="menu-input"
+          value={models.length > 0 && models.includes(value) ? value : ""}
           onChange={(e) => {
             if (e.target.value) {
               onSelect(e.target.value);
-              setOpen(false);
             }
           }}
         >
-          <option value="" disabled>— 选择模型（共 {models.length} 个）—</option>
-          {models.map((m) => (
-            <option key={m} value={m}>{m}</option>
-          ))}
+          {models.length === 0 ? (
+            <option value="">{value || "— 点击右侧按钮获取模型列表 —"}</option>
+          ) : (
+            <>
+              <option value="" disabled>— 选择模型（共 {models.length} 个）—</option>
+              {models.map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </>
+          )}
         </select>
-      )}
+        <button
+          type="button"
+          className="menu-btn model-fetch-btn"
+          onClick={fetchModels}
+          disabled={loading}
+          title="从 API 拉取可用模型列表"
+        >
+          {loading ? <Loader2 size={14} className="spin" /> : <Settings size={14} />}
+        </button>
+      </div>
+      <input
+        className="menu-input model-fetcher-input"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="或手动输入模型名称"
+      />
+      {err && <small className="model-fetcher-err">{err}</small>}
     </div>
   );
 }
@@ -3078,12 +3084,31 @@ function LLMConfigTab() {
         立即生效并写入 <code>data/runtime_llm.json</code>，重启进程后自动加载。api_key 留空保留当前。
       </p>
       <ProviderSelect onSelect={(preset) => {
-        setBaseUrl(preset.base_url);
-        setModel(preset.models[0] || "");
+        if (preset.base_url) setBaseUrl(preset.base_url);
+        if (preset.models[0]) setModel(preset.models[0]);
         if (preset.advanced_models?.length) {
           setAdvancedModel(preset.advanced_models[0]);
         }
       }} />
+      <label className="menu-field">
+        <span>
+          API Key{" "}
+          {info?.has_api_key ? <small className="ok">（当前已设置）</small> : <small className="warn">（未设置）</small>}
+        </span>
+        <div className="menu-row">
+          <input
+            className="menu-input"
+            type={show ? "text" : "password"}
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            placeholder={info?.has_api_key ? "留空保留当前" : "请输入"}
+            autoComplete="off"
+          />
+          <button className="menu-btn" type="button" onClick={() => setShow((v) => !v)}>
+            {show ? "隐" : "显"}
+          </button>
+        </div>
+      </label>
       <label className="menu-field">
         <span>Base URL</span>
         <input
@@ -3095,14 +3120,8 @@ function LLMConfigTab() {
       </label>
       <label className="menu-field">
         <span>Model</span>
-        <input
-          className="menu-input"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-          placeholder="gpt-4o-mini"
-        />
       </label>
-      <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} onSelect={(m) => setModel(m)} />
+      <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} value={model} onChange={setModel} onSelect={setModel} />
       <label className="menu-field">
         <span>Advanced Model <small className="menu-hint">（推演 + 打分专用，空=与 Model 一致）</small></span>
         <input
@@ -3161,25 +3180,6 @@ function LLMConfigTab() {
           onChange={(e) => setTimeoutSeconds(e.target.value)}
           placeholder="180"
         />
-      </label>
-      <label className="menu-field">
-        <span>
-          API Key{" "}
-          {info?.has_api_key ? <small className="ok">（当前已设置）</small> : <small className="warn">（未设置）</small>}
-        </span>
-        <div className="menu-row">
-          <input
-            className="menu-input"
-            type={show ? "text" : "password"}
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder={info?.has_api_key ? "留空保留当前" : "请输入"}
-            autoComplete="off"
-          />
-          <button className="menu-btn" type="button" onClick={() => setShow((v) => !v)}>
-            {show ? "隐" : "显"}
-          </button>
-        </div>
       </label>
       <div className="menu-row">
         <button className="menu-btn primary" onClick={onSave} disabled={busy}>
@@ -4521,23 +4521,25 @@ function ApiSettingsModal({
     <div className="menu-modal-bg" onClick={onClose}>
       <div className="menu-modal" onClick={(e) => e.stopPropagation()}>
         <h2>设置 API</h2>
-        <p className="menu-hint">推荐 DeepSeek（中文好、价格便宜）。配置写入本地，不上传。</p>
         <ProviderSelect onSelect={(preset) => {
-          setBaseUrl(preset.base_url);
-          setModel(preset.models[0] || "");
+          if (preset.base_url) setBaseUrl(preset.base_url);
+          if (preset.models[0]) setModel(preset.models[0]);
           if (preset.advanced_models?.length) {
             setAdvancedModel(preset.advanced_models[0]);
           }
         }} />
+        <label>
+          API Key
+          <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={initial?.has_api_key ? "(已配置；如需更换请重新填写)" : "sk-..."} />
+        </label>
         <label>
           Base URL
           <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com" />
         </label>
         <label>
           Model
-          <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-chat" />
         </label>
-        <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} onSelect={(m) => setModel(m)} />
+        <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} value={model} onChange={setModel} onSelect={setModel} />
         <label>
           Advanced Model <small className="menu-hint">（推演 + 打分专用；留空 fallback）</small>
           <input value={advancedModel} onChange={(e) => setAdvancedModel(e.target.value)} placeholder="deepseek-reasoner / gpt-5" />
@@ -4558,10 +4560,6 @@ function ApiSettingsModal({
         <label>
           Timeout Seconds
           <input type="number" min={10} max={900} value={timeoutSeconds} onChange={(e) => setTimeoutSeconds(e.target.value)} placeholder="180" />
-        </label>
-        <label>
-          API Key
-          <input type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={initial?.has_api_key ? "(已配置；如需更换请重新填写)" : "sk-..."} />
         </label>
         {err && <div className="menu-error">{err}</div>}
         <div className="menu-modal-actions">
