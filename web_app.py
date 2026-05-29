@@ -897,7 +897,26 @@ def sse_event(event: str, data: Dict[str, Any]) -> str:
 
 
 web_games: Dict[str, WebGame] = {}
+# 每用户 asyncio 锁，防止同一用户的并发请求竞争修改 game 状态
+_user_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_user_lock(user_id: str) -> asyncio.Lock:
+    """获取或创建指定用户的 asyncio.Lock。"""
+    if user_id not in _user_locks:
+        _user_locks[user_id] = asyncio.Lock()
+    return _user_locks[user_id]
+
+
 app = FastAPI(title="Ming Salvage MVP Web")
+
+
+def _extract_bearer_token(request: Request) -> Optional[str]:
+    """从请求头提取 Bearer token，无则返回 None。"""
+    token_header = request.headers.get("authorization", "")
+    if not token_header.lower().startswith("bearer "):
+        return None
+    return token_header.split(" ", 1)[1].strip() or None
 
 
 @app.middleware("http")
@@ -909,14 +928,14 @@ async def auth_middleware(request: Request, call_next):
         and not path.startswith("/portraits/custom/")
     ) or path.startswith("/api/auth/") or path == "/api/healthz":
         return await call_next(request)
-    token_header = request.headers.get("authorization", "")
-    if not token_header.lower().startswith("bearer "):
+    token = _extract_bearer_token(request)
+    if not token:
         return JSONResponse({"detail": "请先登录。"}, status_code=401)
-    token = token_header.split(" ", 1)[1].strip()
     try:
         user = multi_user_service.verify_bearer_token(token)
-    except Exception as exc:
-        return JSONResponse({"detail": f"认证失败：{exc}"}, status_code=401)
+    except Exception:
+        # 不暴露具体错误细节，避免信息泄露
+        return JSONResponse({"detail": "认证失败，请重新登录。"}, status_code=401)
     if user.status == "disabled":
         return JSONResponse({"detail": "账号已停用，请联系管理员。"}, status_code=403)
     if user.status == "deleted":
@@ -935,14 +954,13 @@ async def api_healthz() -> Dict[str, Any]:
 
 @app.get("/api/auth/me")
 async def api_auth_me(request: Request) -> Dict[str, Any]:
-    token_header = request.headers.get("authorization", "")
-    if not token_header.lower().startswith("bearer "):
+    token = _extract_bearer_token(request)
+    if not token:
         raise HTTPException(status_code=401, detail="缺少 Bearer token。")
-    token = token_header.split(" ", 1)[1].strip()
     try:
         user = multi_user_service.verify_bearer_token(token)
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"认证失败：{exc}") from exc
+    except Exception:
+        raise HTTPException(status_code=401, detail="认证失败，请重新登录。")
     if user.status == "disabled":
         raise HTTPException(status_code=403, detail="账号已停用，请联系管理员。")
     if user.status == "deleted":
@@ -972,7 +990,7 @@ async def api_admin_users() -> Dict[str, Any]:
             except Exception:
                 progress = {}
         enriched.append({**item, "progress": progress})
-    multi_user_service.add_audit_log(admin.id, "view_users", "all")
+    # 只读操作不记审计日志，避免频繁打开管理面板产生大量低价值记录
     return {"users": enriched}
 
 
@@ -1019,10 +1037,9 @@ async def api_admin_delete_user(user_id: str) -> Dict[str, Any]:
 
 @app.get("/api/admin/users/{user_id}/progress")
 async def api_admin_user_progress(user_id: str) -> Dict[str, Any]:
-    admin = _require_admin()
+    _require_admin()
     progress = multi_user_service.get_user_progress_record(user_id)
     save_count = len(_scan_saves(user_id))
-    multi_user_service.add_audit_log(admin.id, "view_progress", user_id)
     return {"progress": progress, "save_count": save_count}
 
 
@@ -1300,9 +1317,66 @@ async def api_menu_save_llm(request: LlmSetupRequest) -> Dict[str, Any]:
             "has_advanced_api_key": bool(advanced_api_key),
         },
     }
+
+
+class FetchModelsRequest(BaseModel):
+    base_url: str
+    api_key: str = ""
+
+
+@app.post("/api/llm/models")
+async def api_fetch_models(request: FetchModelsRequest) -> Dict[str, Any]:
+    """拉取指定 API 端点支持的模型列表（OpenAI 兼容 /v1/models）。"""
+    user = _get_current_user_or_401()
+    base_url = normalize_openai_base_url((request.base_url or "").strip())
+    api_key = (request.api_key or "").strip()
+    if not api_key:
+        # 尝试从用户已保存的配置或环境变量中获取
+        runtime = load_runtime_llm(runtime_path=user_scope_path(user.id, "runtime_llm.json"))
+        api_key = runtime.get("api_key") or os.environ.get("OPENAI_API_KEY", "")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url 不能为空。")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key 未配置，请先填写 API Key。")
+    import httpx
+    # 拼接 /models 端点
+    models_url = base_url.rstrip("/") + "/models"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(models_url, headers={"Authorization": f"Bearer {api_key}"})
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"模型列表请求失败（HTTP {resp.status_code}）：{resp.text[:200]}",
+                )
+            data = resp.json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="请求模型列表超时，请检查 Base URL 是否可达。")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"请求模型列表失败：{exc}")
+    # OpenAI 格式：{ "data": [{ "id": "model-name", ... }] }
+    models_raw = data.get("data") or data.get("models") or []
+    if isinstance(models_raw, list):
+        models = sorted(
+            [str(m.get("id") or m.get("name") or "") for m in models_raw if isinstance(m, dict)],
+            key=lambda x: x.lower(),
+        )
+    else:
+        models = []
+    return {"models": [m for m in models if m]}
+
+
+# CORS：开发环境 + 通过环境变量 CORS_ORIGINS 配置生产域名（逗号分隔）
+_cors_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+_extra_origins = os.environ.get("CORS_ORIGINS", "").strip()
+if _extra_origins:
+    _cors_origins.extend([o.strip() for o in _extra_origins.split(",") if o.strip()])
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

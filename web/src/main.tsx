@@ -354,7 +354,11 @@ const formatApiError = (error: any, fallback: string) => {
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Supabase SDK 要求非空 URL/key，未配置时用占位值创建（不会实际连接）
+const supabase = createClient(
+  supabaseUrl || "https://placeholder.supabase.co",
+  supabaseAnonKey || "placeholder-anon-key",
+);
 
 let authToken = "";
 const setAuthToken = (token: string) => {
@@ -568,6 +572,181 @@ type MenuStatus = {
   };
 };
 
+// ── API Provider 预设 ──────────────────────────────────────────────────────
+type LLMProviderPreset = {
+  name: string;
+  base_url: string;
+  models: string[];
+  advanced_models?: string[];
+  note?: string;
+};
+
+const LLM_PROVIDER_PRESETS: LLMProviderPreset[] = [
+  {
+    name: "DeepSeek",
+    base_url: "https://api.deepseek.com",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+    advanced_models: ["deepseek-reasoner"],
+    note: "国产首选，中文好、价格低",
+  },
+  {
+    name: "OpenAI",
+    base_url: "https://api.openai.com/v1",
+    models: ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o3-mini"],
+    advanced_models: ["gpt-4.1", "o3-mini"],
+    note: "需海外网络或代理",
+  },
+  {
+    name: "Google Gemini",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+    advanced_models: ["gemini-2.5-pro"],
+    note: "需海外网络；兼容 OpenAI 格式",
+  },
+  {
+    name: "Kimi (月之暗面)",
+    base_url: "https://api.moonshot.cn/v1",
+    models: ["moonshot-v1-auto", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+    advanced_models: ["moonshot-v1-128k"],
+    note: "国产，长上下文",
+  },
+  {
+    name: "智谱 BigModel",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    models: ["glm-4-flash", "glm-4-plus", "glm-4-long"],
+    advanced_models: ["glm-4-plus"],
+    note: "国产，免费额度充足",
+  },
+  {
+    name: "OpenRouter",
+    base_url: "https://openrouter.ai/api/v1",
+    models: ["deepseek/deepseek-chat", "openai/gpt-4o-mini", "google/gemini-2.5-flash", "anthropic/claude-sonnet-4"],
+    advanced_models: ["openai/gpt-4.1", "anthropic/claude-sonnet-4"],
+    note: "聚合网关，一个 key 用多家模型",
+  },
+  {
+    name: "小米 MiMo",
+    base_url: "https://api.mimo.xiaomi.com/v1",
+    models: ["MiMo-GPT2-Medium"],
+    note: "小米大模型",
+  },
+  {
+    name: "阿里 通义千问",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    models: ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"],
+    advanced_models: ["qwen-max"],
+    note: "国产，兼容 OpenAI 格式",
+  },
+  {
+    name: "硅基流动 SiliconFlow",
+    base_url: "https://api.siliconflow.cn/v1",
+    models: ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "Qwen/Qwen2.5-72B-Instruct"],
+    advanced_models: ["deepseek-ai/DeepSeek-R1"],
+    note: "国产聚合，免费额度",
+  },
+];
+
+function ProviderSelect({ onSelect }: { onSelect: (preset: LLMProviderPreset) => void }) {
+  return (
+    <div className="menu-field provider-select">
+      <span>快速选择服务商</span>
+      <select
+        className="menu-input"
+        defaultValue=""
+        onChange={(e) => {
+          const idx = parseInt(e.target.value);
+          if (!isNaN(idx) && LLM_PROVIDER_PRESETS[idx]) {
+            onSelect(LLM_PROVIDER_PRESETS[idx]);
+          }
+          e.target.value = "";
+        }}
+      >
+        <option value="" disabled>— 选择预设服务商 —</option>
+        {LLM_PROVIDER_PRESETS.map((p, i) => (
+          <option key={p.name} value={i}>{p.name}{p.note ? ` (${p.note})` : ""}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ModelFetcher({
+  baseUrl,
+  apiKey,
+  onSelect,
+  className,
+}: {
+  baseUrl: string;
+  apiKey: string;
+  onSelect: (model: string) => void;
+  className?: string;
+}) {
+  const [models, setModels] = React.useState<string[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const [open, setOpen] = React.useState(false);
+
+  const fetchModels = async () => {
+    if (!baseUrl.trim()) {
+      setErr("请先填写 Base URL");
+      return;
+    }
+    setLoading(true);
+    setErr("");
+    setModels([]);
+    setOpen(false);
+    try {
+      const data = await api<{ models: string[] }>("/api/llm/models", {
+        method: "POST",
+        body: JSON.stringify({ base_url: baseUrl.trim(), api_key: apiKey.trim() }),
+      });
+      if (data.models.length === 0) {
+        setErr("该 API 未返回可用模型列表。");
+      } else {
+        setModels(data.models);
+        setOpen(true);
+      }
+    } catch (e: any) {
+      setErr(e?.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className={`model-fetcher ${className || ""}`}>
+      <button
+        type="button"
+        className="menu-btn"
+        onClick={fetchModels}
+        disabled={loading}
+        title="从 API 拉取可用模型列表"
+      >
+        {loading ? <Loader2 size={13} className="spin" /> : <Settings size={13} />}
+        {loading ? " 拉取中..." : " 拉取模型列表"}
+      </button>
+      {err && <small className="model-fetcher-err">{err}</small>}
+      {open && models.length > 0 && (
+        <select
+          className="menu-input model-fetcher-select"
+          defaultValue=""
+          onChange={(e) => {
+            if (e.target.value) {
+              onSelect(e.target.value);
+              setOpen(false);
+            }
+          }}
+        >
+          <option value="" disabled>— 选择模型（共 {models.length} 个）—</option>
+          {models.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const [currentUser, setCurrentUser] = React.useState<CurrentUser | null>(null);
   const [authBusy, setAuthBusy] = React.useState(false);
@@ -656,6 +835,11 @@ function App() {
 
   React.useEffect(() => {
     (async () => {
+      // Supabase 未配置时跳过 session 恢复，直接显示登录页
+      if (!supabaseUrl || !supabaseAnonKey) {
+        setAuthBusy(false);
+        return;
+      }
       setAuthBusy(true);
       try {
         const { data } = await supabase.auth.getSession();
@@ -677,6 +861,21 @@ function App() {
       }
     })();
   }, [refreshMenuStatus, loadState]);
+
+  // 监听 Supabase auth 状态变化（token 刷新、登出等），保持 authToken 同步
+  React.useEffect(() => {
+    if (!supabaseUrl || !supabaseAnonKey) return;
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newToken = session?.access_token || "";
+      setAuthToken(newToken);
+      if (!newToken) {
+        setCurrentUser(null);
+        setState(null);
+        setAppView("menu");
+      }
+    });
+    return () => subscription.unsubscribe();
+  }, []);
 
   const signInOrUp = React.useCallback(async () => {
     setError("");
@@ -762,7 +961,7 @@ function App() {
         }
         setSecretOrderShown(currentTurn);
       })
-      .catch(() => {/* 失败静默 */});
+      .catch(() => {/* 失败静默 */ });
   }, [state?.turn.turn]);
 
   // 每次进入页面/换回合都弹上回合邸报。不持久化记录——刷新即重新弹。
@@ -833,13 +1032,13 @@ function App() {
             />
             <input
               className="menu-input"
-              placeholder="密码（至少 6 位）"
+              placeholder="密码（至少 8 位）"
               type="password"
               value={authPassword}
               onChange={(e) => setAuthPassword(e.target.value)}
               disabled={authBusy}
             />
-            <button className="menu-btn primary" onClick={signInOrUp} disabled={authBusy || !authEmail.trim() || authPassword.length < 6}>
+            <button className="menu-btn primary" onClick={signInOrUp} disabled={authBusy || !authEmail.trim() || authPassword.length < 8}>
               {authBusy ? "处理中..." : authMode === "signin" ? "登录" : "注册并登录"}
             </button>
             <button className="menu-btn" onClick={() => setAuthMode((m) => (m === "signin" ? "signup" : "signin"))} disabled={authBusy}>
@@ -943,7 +1142,7 @@ function App() {
       // 刷新密令列表（含历史，大臣可能调了 issue_secret_order tool）
       api<{ orders: SecretOrder[] }>("/api/secret_orders")
         .then(({ orders }) => setSecretOrders(orders))
-        .catch(() => {});
+        .catch(() => { });
       if (data.secret_order_id) {
         setChatNotice(`密令已秘密交付${activeMinister.name}，编号 #${data.secret_order_id}。`);
       }
@@ -1400,7 +1599,7 @@ function MinisterPortrait({ primary, fallback, name }: { primary: string; fallba
 
 // 朝班两条透视线（百分比锚点，由用户拖定）
 // 左列：韩爌(外) → 黄立极(内)；右列：张瑞图(外) → 施凤来(内)
-const LEFT_ANCHOR  = { near: { px: 0.077, py: 0.532 }, far: { px: 0.377, py: 0.066 } };
+const LEFT_ANCHOR = { near: { px: 0.077, py: 0.532 }, far: { px: 0.377, py: 0.066 } };
 const RIGHT_ANCHOR = { near: { px: 0.862, py: 0.532 }, far: { px: 0.558, py: 0.045 } };
 
 // 每列槽位数
@@ -1468,7 +1667,7 @@ function saveCourtPos(pos: Record<string, { px: number; py: number }>) {
     method: "POST",
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ layout: JSON.stringify(pos) }),
-  }).catch(() => {});
+  }).catch(() => { });
 }
 
 function MinisterCardList({
@@ -1496,13 +1695,13 @@ function MinisterCardList({
 
   // 固定职位 → 固定槽位（由 office 文字推导：office 逗号分项里命中即占该槽）
   const FIXED_SLOTS: { role: string; side: "left" | "right"; slot: number }[] = [
-    { role: "首辅",    side: "left",  slot: 0 },
-    { role: "次辅",    side: "right", slot: 0 },
-    { role: "吏部尚书", side: "left",  slot: 1 },
+    { role: "首辅", side: "left", slot: 0 },
+    { role: "次辅", side: "right", slot: 0 },
+    { role: "吏部尚书", side: "left", slot: 1 },
     { role: "户部尚书", side: "right", slot: 1 },
-    { role: "礼部尚书", side: "left",  slot: 2 },
+    { role: "礼部尚书", side: "left", slot: 2 },
     { role: "兵部尚书", side: "right", slot: 2 },
-    { role: "刑部尚书", side: "left",  slot: 3 },
+    { role: "刑部尚书", side: "left", slot: 3 },
     { role: "工部尚书", side: "right", slot: 3 },
   ];
 
@@ -2147,11 +2346,11 @@ function SecretOrdersModal({
     cancelled: "so-cancelled",
   };
   const tabs: { key: typeof tab; label: string }[] = [
-    { key: "active",         label: `进行中 (${orders.filter(o => o.status === "active").length})` },
+    { key: "active", label: `进行中 (${orders.filter(o => o.status === "active").length})` },
     { key: "pending_review", label: `待核议 (${orders.filter(o => o.status === "pending_review").length})` },
-    { key: "done",           label: `已完成 (${orders.filter(o => o.status === "done").length})` },
-    { key: "failed",         label: `已失败 (${orders.filter(o => o.status === "failed").length})` },
-    { key: "all",            label: `全部 (${orders.length})` },
+    { key: "done", label: `已完成 (${orders.filter(o => o.status === "done").length})` },
+    { key: "failed", label: `已失败 (${orders.filter(o => o.status === "failed").length})` },
+    { key: "all", label: `全部 (${orders.length})` },
   ];
   const visible = tab === "all" ? orders : orders.filter(o => o.status === tab);
   return (
@@ -2878,6 +3077,13 @@ function LLMConfigTab() {
       <p className="menu-hint">
         立即生效并写入 <code>data/runtime_llm.json</code>，重启进程后自动加载。api_key 留空保留当前。
       </p>
+      <ProviderSelect onSelect={(preset) => {
+        setBaseUrl(preset.base_url);
+        setModel(preset.models[0] || "");
+        if (preset.advanced_models?.length) {
+          setAdvancedModel(preset.advanced_models[0]);
+        }
+      }} />
       <label className="menu-field">
         <span>Base URL</span>
         <input
@@ -2896,6 +3102,7 @@ function LLMConfigTab() {
           placeholder="gpt-4o-mini"
         />
       </label>
+      <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} onSelect={(m) => setModel(m)} />
       <label className="menu-field">
         <span>Advanced Model <small className="menu-hint">（推演 + 打分专用，空=与 Model 一致）</small></span>
         <input
@@ -3949,7 +4156,7 @@ function GrandMap({ nodes, selectedId, onSelect }: { nodes: MapNode[]; selectedI
   const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
     const st = dragState.current;
     if (!st || st.pointerId !== e.pointerId) return;
-    try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId); } catch {}
+    try { (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId); } catch { }
     dragState.current = null;
     setDragging(false);
   };
@@ -4315,6 +4522,13 @@ function ApiSettingsModal({
       <div className="menu-modal" onClick={(e) => e.stopPropagation()}>
         <h2>设置 API</h2>
         <p className="menu-hint">推荐 DeepSeek（中文好、价格便宜）。配置写入本地，不上传。</p>
+        <ProviderSelect onSelect={(preset) => {
+          setBaseUrl(preset.base_url);
+          setModel(preset.models[0] || "");
+          if (preset.advanced_models?.length) {
+            setAdvancedModel(preset.advanced_models[0]);
+          }
+        }} />
         <label>
           Base URL
           <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.deepseek.com" />
@@ -4323,6 +4537,7 @@ function ApiSettingsModal({
           Model
           <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="deepseek-chat" />
         </label>
+        <ModelFetcher baseUrl={baseUrl} apiKey={apiKey} onSelect={(m) => setModel(m)} />
         <label>
           Advanced Model <small className="menu-hint">（推演 + 打分专用；留空 fallback）</small>
           <input value={advancedModel} onChange={(e) => setAdvancedModel(e.target.value)} placeholder="deepseek-reasoner / gpt-5" />

@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import Client, create_client
 
 logger = logging.getLogger(__name__)
+
+# Token 验证结果缓存 TTL（秒）。避免每个请求都远程调用 Supabase。
+_TOKEN_CACHE_TTL = 60
 
 
 def _utc_now_iso() -> str:
@@ -40,6 +45,9 @@ class MultiUserService:
         self.supabase_service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
         self._anon_client: Optional[Client] = None
         self._service_client: Optional[Client] = None
+        # token -> (expire_time, UserContext) 短时缓存，减少 Supabase 远程调用
+        self._token_cache: Dict[str, Tuple[float, UserContext]] = {}
+        self._cache_lock = threading.Lock()
 
     def enabled(self) -> bool:
         return bool(self.supabase_url and self.supabase_anon_key)
@@ -66,10 +74,32 @@ class MultiUserService:
             return self.service_client()
         return self.anon_client()
 
+    def invalidate_user_cache(self, user_id: str) -> None:
+        """当用户状态变更时，清除该用户的所有缓存条目。"""
+        with self._cache_lock:
+            keys_to_remove = [
+                k for k, (_, ctx) in self._token_cache.items() if ctx.id == user_id
+            ]
+            for k in keys_to_remove:
+                del self._token_cache[k]
+
     def verify_bearer_token(self, token: str) -> UserContext:
         token = (token or "").strip()
         if not token:
             raise RuntimeError("缺少 token。")
+
+        # 检查缓存
+        now = time.time()
+        with self._cache_lock:
+            cached = self._token_cache.get(token)
+            if cached is not None:
+                expire_at, user_ctx = cached
+                if now < expire_at:
+                    return user_ctx
+                # 过期，移除
+                del self._token_cache[token]
+
+        # 远程验证
         user_resp = self.anon_client().auth.get_user(token)
         user = getattr(user_resp, "user", None)
         if user is None:
@@ -81,37 +111,48 @@ class MultiUserService:
         profile = self.ensure_profile(user_id=user_id, email=email)
         role = str(profile.get("role") or "user")
         status = str(profile.get("status") or "active")
-        return UserContext(id=user_id, email=email, role=role, status=status)
+        user_ctx = UserContext(id=user_id, email=email, role=role, status=status)
+
+        # 写入缓存
+        with self._cache_lock:
+            self._token_cache[token] = (now + _TOKEN_CACHE_TTL, user_ctx)
+            # 简单清理：缓存超过 500 条时移除过期条目
+            if len(self._token_cache) > 500:
+                self._token_cache = {
+                    k: v for k, v in self._token_cache.items() if v[0] > now
+                }
+
+        return user_ctx
 
     def ensure_profile(self, user_id: str, email: str = "") -> Dict[str, Any]:
-        """读取或创建 profile。已存在时只更新 email，不覆盖 role/status。"""
-        fallback = {"user_id": user_id, "email": email, "role": "user", "status": "active"}
-        try:
-            client = self._profile_client()
-            query = client.table("profiles").select("*").eq("user_id", user_id).limit(1).execute()
-            rows = list(getattr(query, "data", None) or [])
-            if rows:
-                profile = dict(rows[0])
-                if email and email != str(profile.get("email") or ""):
-                    client.table("profiles").update(
-                        {"email": email, "updated_at": _utc_now_iso()}
-                    ).eq("user_id", user_id).execute()
-                    profile["email"] = email
-                return profile
+        """读取或创建 profile。已存在时只更新 email，不覆盖 role/status。
 
-            role = "admin" if _bootstrap_admin_email() and email.lower() == _bootstrap_admin_email() else "user"
-            payload = {
-                "user_id": user_id,
-                "email": email,
-                "role": role,
-                "status": "active",
-                "updated_at": _utc_now_iso(),
-            }
-            client.table("profiles").insert(payload).execute()
-            return payload
-        except Exception as exc:
-            logger.warning("ensure_profile failed for %s: %s", user_id, exc)
-            return fallback
+        注意：网络/数据库错误会向上抛出，不再静默返回 fallback，
+        避免被封禁的用户在 Supabase 短暂故障时绕过权限检查。
+        """
+        client = self._profile_client()
+        query = client.table("profiles").select("*").eq("user_id", user_id).limit(1).execute()
+        rows = list(getattr(query, "data", None) or [])
+        if rows:
+            profile = dict(rows[0])
+            if email and email != str(profile.get("email") or ""):
+                client.table("profiles").update(
+                    {"email": email, "updated_at": _utc_now_iso()}
+                ).eq("user_id", user_id).execute()
+                profile["email"] = email
+            return profile
+
+        # 新用户，创建 profile
+        role = "admin" if _bootstrap_admin_email() and email.lower() == _bootstrap_admin_email() else "user"
+        payload = {
+            "user_id": user_id,
+            "email": email,
+            "role": role,
+            "status": "active",
+            "updated_at": _utc_now_iso(),
+        }
+        client.table("profiles").insert(payload).execute()
+        return payload
 
     def set_auth_access(self, user_id: str, allow: bool) -> None:
         """同步 Supabase Auth：allow=False 时禁止登录。"""
@@ -141,9 +182,16 @@ class MultiUserService:
             .execute()
         )
         rows = list(getattr(result, "data", None) or [])
+        # 状态变更后清除该用户的 token 缓存，确保下次请求重新验证
+        self.invalidate_user_cache(user_id)
         return rows[0] if rows else {"user_id": user_id, "status": status}
 
     def soft_delete_user(self, user_id: str) -> Dict[str, Any]:
+        """软删除用户。标记 status=deleted 并 ban Auth 登录。
+
+        注意：Supabase Auth 记录仍保留（仅 ban），这是有意设计——
+        避免 UUID 回收风险，且保留审计追溯能力。
+        """
         return self.update_user_status(user_id, "deleted")
 
     def save_progress_record(

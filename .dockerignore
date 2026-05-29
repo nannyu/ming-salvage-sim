@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+data/
+docs/
+scripts/
+web/node_modules/
+web/src/
+web/tsconfig*.json
+web/vite.config.ts
+web/package*.json
+*.spec
+.env
+.env.*

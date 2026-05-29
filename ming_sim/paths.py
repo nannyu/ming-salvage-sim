@@ -41,8 +41,12 @@ def bundled_path(*parts: str) -> str:
 def user_data_dir() -> Path:
     """用户可写数据目录。
     frozen：~/.ming_sim/（首次自动建）。
-    源码：<repo>/data/（沿用旧布局，便于开发期切换存档）。"""
-    if is_frozen():
+    源码：<repo>/data/（沿用旧布局，便于开发期切换存档）。
+    环境变量 MING_SIM_DATA_DIR 可覆盖（用于容器部署挂载持久卷）。"""
+    env_dir = os.environ.get("MING_SIM_DATA_DIR", "").strip()
+    if env_dir:
+        d = Path(env_dir)
+    elif is_frozen():
         d = Path.home() / ".ming_sim"
     else:
         d = Path(__file__).resolve().parent.parent / "data"
@@ -58,7 +62,12 @@ def user_data_path(*parts: str) -> str:
 
 
 def scoped_user_id(raw_user_id: str) -> str:
-    """把外部 user_id 规整为可安全落盘的目录名。"""
+    """把外部 user_id 规整为可安全落盘的目录名。
+
+    假设输入为 Supabase UUID 格式（如 550e8400-e29b-41d4-a716-446655440000），
+    经过此函数后保持不变。非 UUID 格式的 ID 中特殊字符会被替换为下划线，
+    理论上存在碰撞风险，但当前系统只使用 UUID。
+    """
     raw = (raw_user_id or "").strip().lower()
     if not raw:
         return "anonymous"
