@@ -722,7 +722,7 @@ function ModelFetcher({
           }}
         >
           {models.length === 0 ? (
-            <option value="">{value || "— 点击右侧按钮获取模型列表 —"}</option>
+            <option value="">{value || "— 点击右侧按钮拉取模型列表 —"}</option>
           ) : (
             <>
               <option value="" disabled>— 选择模型（共 {models.length} 个）—</option>
@@ -737,9 +737,9 @@ function ModelFetcher({
           className="menu-btn model-fetch-btn"
           onClick={fetchModels}
           disabled={loading}
-          title="从 API 拉取可用模型列表"
+          title="拉取模型列表"
         >
-          {loading ? <Loader2 size={14} className="spin" /> : <Settings size={14} />}
+          {loading ? <Loader2 size={12} className="spin" /> : <Settings size={12} />}
         </button>
       </div>
       <input
@@ -756,7 +756,6 @@ function ModelFetcher({
 function App() {
   const [currentUser, setCurrentUser] = React.useState<CurrentUser | null>(null);
   const [authBusy, setAuthBusy] = React.useState(false);
-  const [authMode, setAuthMode] = React.useState<"signin" | "signup">("signin");
   const [authEmail, setAuthEmail] = React.useState("");
   const [authPassword, setAuthPassword] = React.useState("");
   const [appView, setAppView] = React.useState<AppView>("menu");
@@ -890,37 +889,41 @@ function App() {
       if (!supabaseUrl || !supabaseAnonKey) {
         throw new Error("前端缺少 VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY。");
       }
-      if (authMode === "signup") {
-        const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
-          email: authEmail.trim(),
-          password: authPassword,
-        });
-        if (signUpErr) throw signUpErr;
-        const signupToken = signUpData.session?.access_token || "";
-        if (signupToken) {
-          setAuthToken(signupToken);
-          await refreshMenuStatus();
-          return;
-        }
-        throw new Error("注册成功。若项目开启了邮箱验证，请先到邮箱点确认链接后再登录。");
-      }
+      // 先尝试登录
       const { data, error: signInErr } = await supabase.auth.signInWithPassword({
         email: authEmail.trim(),
         password: authPassword,
       });
-      if (signInErr) throw signInErr;
-      const token = data.session?.access_token || "";
-      if (!token) {
-        throw new Error("登录失败：未获得会话 token。");
+      if (!signInErr && data.session?.access_token) {
+        setAuthToken(data.session.access_token);
+        await refreshMenuStatus();
+        return;
       }
-      setAuthToken(token);
-      await refreshMenuStatus();
+      // 登录失败且是"用户不存在"类错误，自动注册
+      const errMsg = signInErr?.message?.toLowerCase() || "";
+      const isUserNotFound = errMsg.includes("invalid login") || errMsg.includes("invalid_credentials") || errMsg.includes("user not found");
+      if (!isUserNotFound) {
+        throw signInErr || new Error("登录失败");
+      }
+      // 自动注册
+      const { data: signUpData, error: signUpErr } = await supabase.auth.signUp({
+        email: authEmail.trim(),
+        password: authPassword,
+      });
+      if (signUpErr) throw signUpErr;
+      const signupToken = signUpData.session?.access_token || "";
+      if (signupToken) {
+        setAuthToken(signupToken);
+        await refreshMenuStatus();
+        return;
+      }
+      throw new Error("注册成功，请到邮箱点确认链接后重新登录。");
     } catch (err: any) {
       setError(err?.message || String(err));
     } finally {
       setAuthBusy(false);
     }
-  }, [authEmail, authMode, authPassword, refreshMenuStatus]);
+  }, [authEmail, authPassword, refreshMenuStatus]);
 
   const signOut = React.useCallback(async () => {
     await supabase.auth.signOut();
@@ -1026,7 +1029,7 @@ function App() {
       <div className="menu-screen">
         <div className="menu-panel">
           <h1 className="menu-title">明末力挽狂澜</h1>
-          <p className="menu-subtitle">请先登录后进入你的独立存档</p>
+          <p className="menu-subtitle">输入邮箱和密码，新用户自动注册</p>
           {error ? <div className="menu-error">{error}</div> : null}
           <div className="menu-buttons" style={{ gap: 8 }}>
             <input
@@ -1043,12 +1046,10 @@ function App() {
               value={authPassword}
               onChange={(e) => setAuthPassword(e.target.value)}
               disabled={authBusy}
+              onKeyDown={(e) => { if (e.key === "Enter" && authEmail.trim() && authPassword.length >= 8) signInOrUp(); }}
             />
             <button className="menu-btn primary" onClick={signInOrUp} disabled={authBusy || !authEmail.trim() || authPassword.length < 8}>
-              {authBusy ? "处理中..." : authMode === "signin" ? "登录" : "注册并登录"}
-            </button>
-            <button className="menu-btn" onClick={() => setAuthMode((m) => (m === "signin" ? "signup" : "signin"))} disabled={authBusy}>
-              {authMode === "signin" ? "没有账号？去注册" : "已有账号？去登录"}
+              {authBusy ? "处理中..." : "进入"}
             </button>
           </div>
         </div>

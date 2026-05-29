@@ -3581,7 +3581,9 @@ button:disabled {
 
 .model-fetch-btn {
   flex-shrink: 0;
-  padding: 6px 10px;
+  padding: 4px 8px;
+  min-width: auto;
+  font-size: 0.78rem;
 }
 
 .model-fetcher-input {
