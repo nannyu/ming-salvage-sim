@@ -1,3 +1,12 @@
+# Stage 1: Build frontend
+FROM node:20-slim AS frontend
+WORKDIR /web
+COPY web/package.json web/package-lock.json* ./
+RUN npm install
+COPY web/ .
+RUN npm run build
+
+# Stage 2: Python backend
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -14,10 +23,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 复制项目文件
 COPY ming_sim/ ming_sim/
 COPY content/ content/
-COPY web/dist/ web/dist/
 COPY web_app.py .
 COPY main.py .
 COPY .agno_skills/ .agno_skills/
+
+# 从 frontend stage 复制构建产物
+COPY --from=frontend /web/dist web/dist/
 
 # 数据目录（Railway 持久卷挂载点）
 RUN mkdir -p /data
