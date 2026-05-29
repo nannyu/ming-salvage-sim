@@ -43,4 +43,4 @@ ENV MING_SIM_DATA_DIR=/data
 EXPOSE 8010
 
 # 启动命令
-CMD ["python", "-m", "uvicorn", "web_app:app", "--host", "0.0.0.0", "--port", "8010", "--timeout-keep-alive", "300"]
+CMD ["sh", "-c", "python -m uvicorn web_app:app --host 0.0.0.0 --port ${PORT:-8010} --timeout-keep-alive 300"]
